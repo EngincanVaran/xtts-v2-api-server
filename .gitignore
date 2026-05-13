@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# pip-tools generated lockfile (committed) vs local caches
+# requirements.txt IS committed — don't ignore it
+pip-*.log
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Runtime output directories (mount as volumes in production)
+xtts_server/outputs/
+xtts_server/speakers/
+xtts_server/logs/
+
+# Model weights — never commit (multi-GB files)
+*.pth
+*.bin
+*.onnx
+*.safetensors
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# Docker
+*.tar
