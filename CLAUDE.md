@@ -163,6 +163,9 @@ This guarantees the slot is freed even if the client disconnects mid-stream or a
 
 `release()` also increments `WorkerHandle.total_requests` (fixing the long-standing bug where it always showed 0).
 
+### 12. Audio file deleted after first download
+`GET /v1/tts/{job_id}/audio` uses a `starlette.background.BackgroundTask` to delete the audio file from disk and clear `job.audio_path` immediately after the response is sent. Subsequent downloads return `410 Gone`. The polling response (`GET /v1/jobs/{id}`) hides `audio_url` once `audio_path` is cleared. The TTL cleanup loop is unaffected (it skips files that are already gone).
+
 ### 13. GPU memory fraction (`GPU_MEMORY_FRACTION`)
 Workers read `os.environ.get("GPU_MEMORY_FRACTION", "1.0")` and call `torch.cuda.set_per_process_memory_fraction(fraction, gpu_index)` **before** the model is loaded. This caps how much VRAM each worker process can allocate. `start-server.sh` validates and exports this value; `worker.py` applies it in `_apply_memory_fraction()` called at device setup time.
 
@@ -173,9 +176,6 @@ A value of `1.0` (default) disables the cap. Only values in `(0.0, 1.0)` apply t
 
 ### 15. HTTP access log middleware
 Registered in `create_app()` via `@app.middleware("http")`. Logs one line per request at INFO (DEBUG for `/health`). Generates or forwards `X-Request-ID` (8-char hex) and echoes it as a response header — clients can pass `X-Request-ID` to correlate logs with their own traces. WebSocket upgrades appear as `101`.
-
-### 12. Audio file deleted after first download
-`GET /v1/tts/{job_id}/audio` uses a `starlette.background.BackgroundTask` to delete the audio file from disk and clear `job.audio_path` immediately after the response is sent. Subsequent downloads return `410 Gone`. The polling response (`GET /v1/jobs/{id}`) hides `audio_url` once `audio_path` is cleared. The TTL cleanup loop is unaffected (it skips files that are already gone).
 
 ---
 
@@ -390,14 +390,21 @@ Pre-flight checks: OS, MODEL_PATH (catches placeholder), `nvidia-smi`, CUDA vers
 
 ## macOS Dev Setup
 
-`llvmlite` (via numba → librosa → TTS) does not build from source on macOS without LLVM. Use conda:
+`coqui-tts==0.27.1` with the new requirements resolves `llvmlite` and `numba` automatically via pip on macOS Intel. Use a named venv:
 
 ```bash
-brew install miniconda
-conda create -n xtts python=3.11
-conda activate xtts
-conda install -c conda-forge llvmlite numba librosa
-pip install -r requirements.txt
+# from project root
+python3 -m venv .venv-coqui
+.venv-coqui/bin/pip install --upgrade pip pip-tools
+.venv-coqui/bin/pip-compile requirements.in -o requirements.txt
+.venv-coqui/bin/pip install coqui-tts==0.27.1 --no-deps
+.venv-coqui/bin/pip install -r requirements.txt
+```
+
+Start the server (macOS dev, CPU):
+```bash
+cd xtts_server
+MODEL_PATH=../model DEFAULT_LANGUAGE=tr WORKERS_PER_GPU=1 ../.venv-coqui/bin/python main.py
 ```
 
 For GPU inference you need a Linux machine or Docker with `--gpus all`.
@@ -407,6 +414,6 @@ For GPU inference you need a Linux machine or Docker with `--gpus all`.
 ## Git / GitHub
 
 - Repo: https://github.com/EngincanVaran/xtts-v2-api-server
-- Branch: `main`
+- Branches: `main` (stable), `development` (active dev/test)
 - Remote name: `origin`
-- `.gitignore` excludes: `__pycache__/`, `.venv/`, `outputs/`, `speakers/`, `logs/`, `*.pth`, `.env`, `.idea/`, `model/`
+- `.gitignore` excludes: `__pycache__/`, `.venv/`, `.venv-*/`, `outputs/`, `speakers/`, `logs/`, `*.pth`, `.env`, `.idea/`, `model/`
