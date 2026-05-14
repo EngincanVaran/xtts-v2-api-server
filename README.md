@@ -60,11 +60,26 @@ For WebSocket streaming, `model.inference_stream()` is used instead — it yield
 
 ### 2. Install dependencies
 
+> **macOS note:** `llvmlite` (a transitive dep via numba → librosa → TTS) does not build from source on macOS without LLVM. Use conda instead of a plain venv:
+> ```bash
+> brew install miniconda
+> conda create -n xtts python=3.11
+> conda activate xtts
+> conda install -c conda-forge llvmlite numba librosa
+> pip install -r requirements.txt
+> ```
+
+On Linux / Docker, a plain pip install works:
+
 ```bash
-cd xtts_server
 pip install pip-tools
-pip-compile requirements.in -o requirements.txt
 pip install -r requirements.txt
+```
+
+To regenerate the lockfile after editing `requirements.in`:
+
+```bash
+pip-compile requirements.in -o requirements.txt
 ```
 
 ### 3. Run the server
@@ -240,27 +255,31 @@ docker run --gpus all \
 ## Project Structure
 
 ```
-xtts_server/
-├── main.py             # FastAPI app factory, startup/shutdown lifecycle
-├── config.py           # Pydantic settings, MODEL_PATH validation
-├── dispatcher.py       # Worker process pool, least-loaded routing
-├── queue_manager.py    # asyncio waiting queue, backpressure
-├── job_store.py        # In-memory job state + TTL cleanup
-├── worker.py           # XTTS-v2 model process (inference, stream, latents)
-├── speakers.py         # Speaker registration, disk persistence, RAM cache
-├── audio.py            # PCM → WAV / MP3 / OGG / FLAC encoding
-├── logging_config.py   # Structured logging, rotating file handler
-├── routers/
-│   ├── system.py       # GET /health, GET /v1/system/info
-│   ├── tts.py          # POST /v1/tts, GET /v1/tts/{id}/audio
-│   ├── clone.py        # POST /v1/clone
-│   ├── batch.py        # POST /v1/batch
-│   ├── jobs.py         # GET /v1/jobs/{id}, GET /v1/jobs
-│   └── speakers.py     # GET/DELETE /v1/speakers
-├── ws/
-│   └── stream.py       # WS /v1/stream
+xtts-v2-api-server/
 ├── requirements.in     # Direct dependencies (pip-tools source)
-└── requirements.txt    # Pinned lockfile (generated, do not edit)
+├── requirements.txt    # Pinned lockfile (generated — do not edit by hand)
+├── pyproject.toml      # ruff config
+├── Dockerfile
+├── .env.example
+└── xtts_server/
+    ├── main.py             # FastAPI app factory, startup/shutdown lifecycle
+    ├── config.py           # Pydantic settings, MODEL_PATH validation
+    ├── dispatcher.py       # Worker process pool, least-loaded routing
+    ├── queue_manager.py    # asyncio waiting queue, backpressure
+    ├── job_store.py        # In-memory job state + TTL cleanup
+    ├── worker.py           # XTTS-v2 model process (inference, stream, latents)
+    ├── speakers.py         # Speaker registration, disk persistence, RAM cache
+    ├── audio.py            # PCM → WAV / MP3 / OGG / FLAC encoding
+    ├── logging_config.py   # Structured logging, rotating file handler
+    ├── routers/
+    │   ├── system.py       # GET /health, GET /v1/system/info
+    │   ├── tts.py          # POST /v1/tts, GET /v1/tts/{id}/audio
+    │   ├── clone.py        # POST /v1/clone
+    │   ├── batch.py        # POST /v1/batch
+    │   ├── jobs.py         # GET /v1/jobs/{id}, GET /v1/jobs
+    │   └── speakers.py     # GET/DELETE /v1/speakers
+    └── ws/
+        └── stream.py       # WS /v1/stream
 ```
 
 ---
