@@ -152,6 +152,8 @@ class Dispatcher:
         """Send shutdown sentinel to every worker and wait for them to exit."""
         if self._status_task:
             self._status_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._status_task
 
         loop = asyncio.get_running_loop()
         logger.info("Dispatcher — shutting down %d worker(s)", len(self._workers))
