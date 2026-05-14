@@ -22,7 +22,7 @@ fastapi
 uvicorn[standard]
 
 # TTS model
-TTS
+coqui-tts
 
 # Deep learning
 torch
@@ -37,3 +37,9 @@ pydantic-settings
 
 # Numerical
 numpy
+
+# llvmlite 0.47 has no pre-built wheel for Intel Mac Python 3.11 and requires
+# building from source against a specific LLVM version. Pin to the latest
+# version that ships a pre-built wheel for this platform.
+llvmlite==0.45.1       # last stable release with a pre-built wheel for Intel Mac Python 3.11
+numba>=0.60,<0.63      # 0.62.x supports llvmlite 0.45.x
