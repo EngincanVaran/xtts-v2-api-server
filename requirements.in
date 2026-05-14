@@ -20,6 +20,7 @@
 # Web framework
 fastapi
 uvicorn[standard]
+python-multipart
 
 # TTS model
 coqui-tts
