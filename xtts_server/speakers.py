@@ -14,13 +14,12 @@ and must be dispatched to a worker process via ComputeLatentsRequest.
 The dispatcher calls SpeakerStore.register() after receiving the LatentsResult.
 """
 
+from dataclasses import dataclass
+from datetime import UTC, datetime
 import json
 import os
 import shutil
 import threading
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -33,7 +32,7 @@ logger = get_logger(__name__)
 class SpeakerRecord:
     name: str
     wav_path: str
-    gpt_cond_latent: np.ndarray    # float32, shape (1, T, 1024)
+    gpt_cond_latent: np.ndarray  # float32, shape (1, T, 1024)
     speaker_embedding: np.ndarray  # float32, shape (1, 512)
     created_at: str = ""
 
@@ -45,7 +44,7 @@ class SpeakerNotFoundError(KeyError):
 class SpeakerStore:
     def __init__(self, speakers_dir: str) -> None:
         self._dir = speakers_dir
-        self._cache: Dict[str, SpeakerRecord] = {}
+        self._cache: dict[str, SpeakerRecord] = {}
         # Threading lock so that concurrent delete + get cannot race between
         # the shutil.rmtree call and the cache eviction (or a concurrent
         # _load_from_disk trying to read a half-deleted directory).
@@ -81,7 +80,7 @@ class SpeakerStore:
         )
 
         # Metadata
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = datetime.now(UTC).isoformat()
         meta = {"name": name, "created_at": created_at}
         with open(os.path.join(speaker_dir, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
@@ -98,7 +97,8 @@ class SpeakerStore:
         logger.info(
             "Speaker registered | name=%s | dir=%s | "
             "gpt_cond_latent.shape=%s | speaker_embedding.shape=%s",
-            name, speaker_dir,
+            name,
+            speaker_dir,
             gpt_cond_latent.shape,
             speaker_embedding.shape,
         )
@@ -136,7 +136,7 @@ class SpeakerStore:
         logger.info("Speaker cache miss — loaded from disk: %s", name)
         return record
 
-    def list_speakers(self) -> List[dict]:
+    def list_speakers(self) -> list[dict]:
         """Return metadata for every speaker that exists on disk."""
         results = []
         if not os.path.isdir(self._dir):
@@ -187,7 +187,7 @@ class SpeakerStore:
     # Internal
     # ------------------------------------------------------------------
 
-    def _load_from_disk(self, name: str) -> Optional[SpeakerRecord]:
+    def _load_from_disk(self, name: str) -> SpeakerRecord | None:
         speaker_dir = os.path.join(self._dir, name)
         latents_path = os.path.join(speaker_dir, "latents.npz")
         wav_path = os.path.join(speaker_dir, "ref.wav")

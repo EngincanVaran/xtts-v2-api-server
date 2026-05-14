@@ -37,9 +37,9 @@ SUPPORTED_FORMATS: set[str] = {"wav", "mp3", "ogg", "flac"}
 
 # MIME type for each format — used in HTTP Content-Type headers.
 MIME_TYPES: dict[str, str] = {
-    "wav":  "audio/wav",
-    "mp3":  "audio/mpeg",
-    "ogg":  "audio/ogg",
+    "wav": "audio/wav",
+    "mp3": "audio/mpeg",
+    "ogg": "audio/ogg",
     "flac": "audio/flac",
 }
 
@@ -47,8 +47,8 @@ MIME_TYPES: dict[str, str] = {
 # PCM_16 for WAV/OGG keeps file sizes reasonable; PCM_24 for FLAC preserves
 # more of the float32 dynamic range without much size penalty.
 _SF_PARAMS: dict[str, tuple[str, str]] = {
-    "wav":  ("WAV",  "PCM_16"),
-    "ogg":  ("OGG",  "VORBIS"),
+    "wav": ("WAV", "PCM_16"),
+    "ogg": ("OGG", "VORBIS"),
     "flac": ("FLAC", "PCM_24"),
 }
 
@@ -56,6 +56,7 @@ _SF_PARAMS: dict[str, tuple[str, str]] = {
 # ---------------------------------------------------------------------------
 # Core conversion helpers
 # ---------------------------------------------------------------------------
+
 
 def _float32_to_int16(audio: np.ndarray) -> np.ndarray:
     """
@@ -103,14 +104,13 @@ def _encode_mp3(audio: np.ndarray, sample_rate: int, buf: io.BytesIO) -> None:
         from pydub import AudioSegment
     except ImportError as exc:
         raise RuntimeError(
-            "MP3 encoding requires pydub and ffmpeg. "
-            "Install pydub and ensure ffmpeg is on PATH."
+            "MP3 encoding requires pydub and ffmpeg. Install pydub and ensure ffmpeg is on PATH."
         ) from exc
 
     pcm_int16 = _float32_to_int16(audio)
     segment = AudioSegment(
         data=pcm_int16.tobytes(),
-        sample_width=2,       # 2 bytes = int16
+        sample_width=2,  # 2 bytes = int16
         frame_rate=sample_rate,
         channels=1,
     )
@@ -120,6 +120,7 @@ def _encode_mp3(audio: np.ndarray, sample_rate: int, buf: io.BytesIO) -> None:
 # ---------------------------------------------------------------------------
 # File I/O
 # ---------------------------------------------------------------------------
+
 
 def save_audio(
     audio: np.ndarray,
@@ -143,7 +144,10 @@ def save_audio(
     duration_s = len(audio) / sample_rate
     logger.info(
         "Audio saved | path=%s | format=%s | size=%.1f KB | duration=%.2f s",
-        path, fmt, size_kb, duration_s,
+        path,
+        fmt,
+        size_kb,
+        duration_s,
     )
     return len(data)
 
@@ -167,6 +171,7 @@ def load_wav_as_float32(path: str) -> tuple[np.ndarray, int]:
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
+
 
 def mime_type(fmt: AudioFormat) -> str:
     """Return the MIME type string for a given format."""

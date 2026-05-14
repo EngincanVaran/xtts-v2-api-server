@@ -1,6 +1,6 @@
 import logging
-import os
 from logging.handlers import RotatingFileHandler
+import os
 
 _LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
 _LOG_FILE = os.path.join(_LOG_DIR, "xtts_server.log")

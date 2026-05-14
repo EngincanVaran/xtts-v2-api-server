@@ -24,9 +24,9 @@ All routers are registered under the same FastAPI app instance.
 OpenAPI docs are available at /docs (Swagger UI) and /redoc.
 """
 
+from contextlib import asynccontextmanager
 import time
 
-from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from config import load_settings
@@ -34,7 +34,7 @@ from dispatcher import Dispatcher
 from job_store import JobStore
 from logging_config import get_logger
 from queue_manager import QueueManager
-from routers import system, tts, clone, batch, jobs
+from routers import batch, clone, jobs, system, tts
 from routers import speakers as speakers_router
 from speakers import SpeakerStore
 from ws.stream import router as ws_router
@@ -45,6 +45,7 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Application lifespan (replaces deprecated @app.on_event)
 # ---------------------------------------------------------------------------
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -111,6 +112,7 @@ async def lifespan(app: FastAPI):
 # App factory
 # ---------------------------------------------------------------------------
 
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="XTTS-v2 Inference Server",
@@ -143,8 +145,9 @@ app = create_app()
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import uvicorn
     import os
+
+    import uvicorn
 
     # Re-read settings just for the uvicorn bind config.
     # The full settings load (with model validation) happens inside lifespan.

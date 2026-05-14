@@ -32,6 +32,7 @@ router = APIRouter(prefix="/v1/speakers", tags=["speakers"])
 # Response models
 # ---------------------------------------------------------------------------
 
+
 class SpeakerInfo(BaseModel):
     name: str
     created_at: str
@@ -45,6 +46,7 @@ class SpeakerListResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # GET /v1/speakers
 # ---------------------------------------------------------------------------
+
 
 @router.get(
     "",
@@ -64,6 +66,7 @@ async def list_speakers(request: Request) -> SpeakerListResponse:
 # GET /v1/speakers/{name}
 # ---------------------------------------------------------------------------
 
+
 @router.get(
     "/{name}",
     response_model=SpeakerInfo,
@@ -75,15 +78,16 @@ async def get_speaker(name: str, request: Request) -> SpeakerInfo:
     store: SpeakerStore = request.app.state.speaker_store
     try:
         record = store.get(name)
-    except SpeakerNotFoundError:
+    except SpeakerNotFoundError as exc:
         logger.warning("Speaker not found: %s", name)
-        raise HTTPException(status_code=404, detail=f"Speaker '{name}' not found.")
+        raise HTTPException(status_code=404, detail=f"Speaker '{name}' not found.") from exc
     return SpeakerInfo(name=record.name, created_at=record.created_at)
 
 
 # ---------------------------------------------------------------------------
 # DELETE /v1/speakers/{name}
 # ---------------------------------------------------------------------------
+
 
 class DeleteResponse(BaseModel):
     message: str
@@ -100,9 +104,9 @@ async def delete_speaker(name: str, request: Request) -> DeleteResponse:
     store: SpeakerStore = request.app.state.speaker_store
     try:
         store.delete(name)
-    except SpeakerNotFoundError:
+    except SpeakerNotFoundError as exc:
         logger.warning("Speaker delete — not found: %s", name)
-        raise HTTPException(status_code=404, detail=f"Speaker '{name}' not found.")
+        raise HTTPException(status_code=404, detail=f"Speaker '{name}' not found.") from exc
 
     logger.info("Speaker deleted via API: %s", name)
     return DeleteResponse(message=f"Speaker '{name}' deleted.")

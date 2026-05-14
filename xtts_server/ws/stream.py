@@ -22,7 +22,7 @@ Why raw float32 PCM?
 --------------------
   Sending an encoded container format (WAV, MP3) over a stream would require
   buffering all chunks first so the header can be written.  Raw float32 lets
-  the client start playing back the first chunk (~200–400 ms latency) without
+  the client start playing back the first chunk (~200-400 ms latency) without
   waiting for the full audio.  The client is responsible for knowing the
   sample rate (24 000 Hz) and converting to its preferred format.
 
@@ -35,19 +35,19 @@ Backpressure
 """
 
 import asyncio
+import contextlib
 import json
 import multiprocessing
 import uuid
 
-import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+import numpy as np
 from pydantic import BaseModel, ValidationError
 
 from config import SUPPORTED_LANGUAGES
 from logging_config import get_logger
 from queue_manager import QueueFullError
 from routers.tts import _resolve_speaker
-from speakers import SpeakerNotFoundError
 from worker import StreamSynthesisRequest, SynthesisChunk, SynthesisStreamEnd
 
 logger = get_logger(__name__)
@@ -58,6 +58,7 @@ router = APIRouter(tags=["stream"])
 # ---------------------------------------------------------------------------
 # Incoming message schema (validated after receiving the JSON frame)
 # ---------------------------------------------------------------------------
+
 
 class StreamRequest(BaseModel):
     text: str
@@ -70,6 +71,7 @@ class StreamRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # WebSocket endpoint
 # ---------------------------------------------------------------------------
+
 
 @router.websocket("/v1/stream")
 async def stream_tts(websocket: WebSocket) -> None:
@@ -84,7 +86,7 @@ async def stream_tts(websocket: WebSocket) -> None:
         # ---- Step 1: receive synthesis parameters -------------------
         try:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await _close_error(websocket, job_id, "Timed out waiting for request JSON.")
             return
 
@@ -97,7 +99,8 @@ async def stream_tts(websocket: WebSocket) -> None:
         # ---- Step 2: validate text length ---------------------------
         if len(params.text) > settings.MAX_TEXT_LENGTH:
             await _close_error(
-                websocket, job_id,
+                websocket,
+                job_id,
                 f"Text length {len(params.text)} exceeds MAX_TEXT_LENGTH "
                 f"({settings.MAX_TEXT_LENGTH}).",
             )
@@ -109,15 +112,11 @@ async def stream_tts(websocket: WebSocket) -> None:
             await _close_error(websocket, job_id, f"Unsupported language: '{language}'")
             return
         if language != settings.DEFAULT_LANGUAGE:
-            logger.warning(
-                "Stream job %s — non-default language: %s", job_id, language
-            )
+            logger.warning("Stream job %s — non-default language: %s", job_id, language)
 
         # ---- Step 4: resolve speaker ---------------------------------
         try:
-            gpt_cond_latent, speaker_embedding, speaker_id = _resolve_speaker(
-                params, state
-            )
+            gpt_cond_latent, speaker_embedding, speaker_id = _resolve_speaker(params, state)
         except Exception as exc:
             # _resolve_speaker raises HTTPException; extract detail for WS response.
             detail = getattr(exc, "detail", str(exc))
@@ -126,7 +125,10 @@ async def stream_tts(websocket: WebSocket) -> None:
 
         logger.info(
             "Stream synthesis | job_id=%s | lang=%s | speaker=%s | text_len=%d",
-            job_id, language, speaker_id, len(params.text),
+            job_id,
+            language,
+            speaker_id,
+            len(params.text),
         )
 
         # ---- Step 5: build request and enqueue ----------------------
@@ -173,13 +175,12 @@ async def stream_tts(websocket: WebSocket) -> None:
                     if item.error:
                         logger.error(
                             "Stream error | job_id=%s | error=%s",
-                            job_id, item.error[:300],
+                            job_id,
+                            item.error[:300],
                         )
                         await _close_error(websocket, job_id, item.error[:300])
                     else:
-                        logger.info(
-                            "Stream done | job_id=%s | chunks=%d", job_id, chunk_count
-                        )
+                        logger.info("Stream done | job_id=%s | chunks=%d", job_id, chunk_count)
                         await websocket.send_text(json.dumps({"status": "done"}))
                         await websocket.close()
                     break
@@ -192,21 +193,18 @@ async def stream_tts(websocket: WebSocket) -> None:
         logger.info("WebSocket disconnected by client | job_id=%s", job_id)
     except Exception as exc:
         logger.exception("Unexpected WebSocket error | job_id=%s | %s", job_id, exc)
-        try:
+        with contextlib.suppress(Exception):
             await _close_error(websocket, job_id, "Internal server error.")
-        except Exception:
-            pass  # Connection may already be closed.
 
 
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 
+
 async def _close_error(websocket: WebSocket, job_id: str, detail: str) -> None:
     """Send an error JSON frame and close the connection."""
     logger.warning("Stream closing with error | job_id=%s | detail=%s", job_id, detail)
-    try:
+    with contextlib.suppress(Exception):
         await websocket.send_text(json.dumps({"status": "error", "detail": detail}))
         await websocket.close(code=1013)  # 1013 = Try Again Later
-    except Exception:
-        pass  # Already closed or broken pipe — nothing to do.

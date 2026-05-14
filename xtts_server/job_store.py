@@ -22,12 +22,12 @@ Only DONE and FAILED jobs are pruned — PENDING / RUNNING jobs are never evicte
 """
 
 import asyncio
+import contextlib
+from dataclasses import dataclass, field
+import enum
 import os
 import time
 import uuid
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Dict, Optional
 
 from logging_config import get_logger
 
@@ -38,11 +38,12 @@ logger = get_logger(__name__)
 # Job model
 # ---------------------------------------------------------------------------
 
-class JobStatus(str, Enum):
+
+class JobStatus(enum.StrEnum):
     PENDING = "pending"
     RUNNING = "running"
-    DONE    = "done"
-    FAILED  = "failed"
+    DONE = "done"
+    FAILED = "failed"
 
 
 @dataclass
@@ -50,12 +51,12 @@ class Job:
     job_id: str
     status: JobStatus = JobStatus.PENDING
     created_at: float = field(default_factory=time.monotonic)
-    started_at: Optional[float] = None
-    finished_at: Optional[float] = None
+    started_at: float | None = None
+    finished_at: float | None = None
     # Path to the output audio file on disk (set when status → DONE).
-    audio_path: Optional[str] = None
+    audio_path: str | None = None
     # Human-readable error message (set when status → FAILED).
-    error: Optional[str] = None
+    error: str | None = None
     # Request metadata stored for observability / polling responses.
     text_preview: str = ""
     language: str = ""
@@ -67,17 +68,17 @@ class Job:
     # Derived timing fields (computed on read, not stored separately)
     # ------------------------------------------------------------------
 
-    def queue_wait_ms(self) -> Optional[float]:
+    def queue_wait_ms(self) -> float | None:
         if self.started_at is None:
             return None
         return (self.started_at - self.created_at) * 1000
 
-    def synthesis_ms(self) -> Optional[float]:
+    def synthesis_ms(self) -> float | None:
         if self.started_at is None or self.finished_at is None:
             return None
         return (self.finished_at - self.started_at) * 1000
 
-    def total_ms(self) -> Optional[float]:
+    def total_ms(self) -> float | None:
         if self.finished_at is None:
             return None
         return (self.finished_at - self.created_at) * 1000
@@ -87,18 +88,20 @@ class Job:
 # JobStore
 # ---------------------------------------------------------------------------
 
+
 class JobStore:
     def __init__(self, outputs_dir: str, ttl_seconds: int = 300) -> None:
         self._outputs_dir = outputs_dir
         self._ttl = ttl_seconds
-        self._jobs: Dict[str, Job] = {}
+        self._jobs: dict[str, Job] = {}
         self._lock = asyncio.Lock()
-        self._cleanup_task: Optional[asyncio.Task] = None
+        self._cleanup_task: asyncio.Task | None = None
 
         os.makedirs(outputs_dir, exist_ok=True)
         logger.info(
             "JobStore initialised — outputs_dir=%s, ttl=%ds",
-            outputs_dir, ttl_seconds,
+            outputs_dir,
+            ttl_seconds,
         )
 
     # ------------------------------------------------------------------
@@ -113,10 +116,8 @@ class JobStore:
     async def shutdown(self) -> None:
         if self._cleanup_task:
             self._cleanup_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
 
     # ------------------------------------------------------------------
     # Write path
@@ -140,7 +141,10 @@ class JobStore:
             self._jobs[job_id] = job
         logger.info(
             "Job created | job_id=%s | lang=%s | speaker=%s | preview='%s'",
-            job_id, language, speaker_id, job.text_preview,
+            job_id,
+            language,
+            speaker_id,
+            job.text_preview,
         )
         return job
 
@@ -156,7 +160,9 @@ class JobStore:
             job.gpu_index = gpu_index
         logger.info(
             "Job running | job_id=%s | worker=%s | gpu=%d",
-            job_id, worker_id, gpu_index,
+            job_id,
+            worker_id,
+            gpu_index,
         )
 
     async def mark_done(self, job_id: str, audio_path: str) -> None:
@@ -175,7 +181,9 @@ class JobStore:
 
         logger.info(
             "Job done | job_id=%s | synthesis_ms=%.1f | audio_path=%s",
-            job_id, synthesis_ms, audio_path,
+            job_id,
+            synthesis_ms,
+            audio_path,
         )
 
     async def mark_failed(self, job_id: str, error: str) -> None:
@@ -193,7 +201,7 @@ class JobStore:
     # Read path
     # ------------------------------------------------------------------
 
-    async def get(self, job_id: str) -> Optional[Job]:
+    async def get(self, job_id: str) -> Job | None:
         async with self._lock:
             return self._jobs.get(job_id)
 
@@ -204,7 +212,7 @@ class JobStore:
 
     async def stats(self) -> dict:
         async with self._lock:
-            counts: Dict[str, int] = {s.value: 0 for s in JobStatus}
+            counts: dict[str, int] = {s.value: 0 for s in JobStatus}
             for job in self._jobs.values():
                 counts[job.status.value] += 1
         return {"total": sum(counts.values()), **counts}
@@ -236,7 +244,8 @@ class JobStore:
                         except OSError as e:
                             logger.warning(
                                 "Could not delete audio file %s: %s",
-                                job.audio_path, e,
+                                job.audio_path,
+                                e,
                             )
                     del self._jobs[job_id]
                     evicted.append(job_id)
@@ -244,12 +253,17 @@ class JobStore:
         if evicted:
             logger.info(
                 "JobStore TTL eviction — removed %d job(s): %s",
-                len(evicted), evicted[:10],
+                len(evicted),
+                evicted[:10],
             )
 
         # Periodic summary even when nothing was evicted.
         s = await self.stats()
         logger.info(
             "JobStore status — pending=%d running=%d done=%d failed=%d total=%d",
-            s["pending"], s["running"], s["done"], s["failed"], s["total"],
+            s["pending"],
+            s["running"],
+            s["done"],
+            s["failed"],
+            s["total"],
         )

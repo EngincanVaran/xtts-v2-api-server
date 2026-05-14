@@ -32,12 +32,12 @@ import asyncio
 import multiprocessing
 import os
 
-import numpy as np
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
+import numpy as np
 from pydantic import BaseModel, Field, field_validator
 
-from audio import AudioFormat, SUPPORTED_FORMATS, mime_type, output_filename, save_audio
+from audio import SUPPORTED_FORMATS, AudioFormat, mime_type, output_filename, save_audio
 from config import SUPPORTED_LANGUAGES
 from dispatcher import WorkerHandle
 from job_store import JobStatus, JobStore
@@ -55,6 +55,7 @@ router = APIRouter(prefix="/v1/tts", tags=["tts"])
 # Request / response models
 # ---------------------------------------------------------------------------
 
+
 class TtsRequest(BaseModel):
     text: str = Field(..., description="Text to synthesise.")
     language: str | None = Field(
@@ -68,11 +69,11 @@ class TtsRequest(BaseModel):
     # Raw conditioning arrays — alternative to speaker_name for one-off requests.
     gpt_cond_latent: list[list[list[float]]] | None = Field(
         default=None,
-        description="Pre-computed GPT conditioning latent (shape 1×T×1024).",
+        description="Pre-computed GPT conditioning latent (shape 1xTx1024).",
     )
     speaker_embedding: list[list[float]] | None = Field(
         default=None,
-        description="Pre-computed speaker embedding (shape 1×512).",
+        description="Pre-computed speaker embedding (shape 1x512).",
     )
     format: AudioFormat = Field(
         default="wav",
@@ -90,21 +91,20 @@ class TtsRequest(BaseModel):
     @classmethod
     def _check_language(cls, v: str | None) -> str | None:
         if v is not None and v not in SUPPORTED_LANGUAGES:
-            raise ValueError(
-                f"Unsupported language '{v}'. Supported: {SUPPORTED_LANGUAGES}"
-            )
+            raise ValueError(f"Unsupported language '{v}'. Supported: {SUPPORTED_LANGUAGES}")
         return v
 
 
 class TtsJobResponse(BaseModel):
     job_id: str
-    status: str          # always "pending" on creation
-    poll_url: str        # convenience URL for the client to poll
+    status: str  # always "pending" on creation
+    poll_url: str  # convenience URL for the client to poll
 
 
 # ---------------------------------------------------------------------------
 # POST /v1/tts — submit job
 # ---------------------------------------------------------------------------
+
 
 @router.post(
     "",
@@ -137,7 +137,8 @@ async def submit_tts(body: TtsRequest, request: Request) -> TtsJobResponse:
     if language != settings.DEFAULT_LANGUAGE:
         logger.warning(
             "Non-default language requested | lang=%s | default=%s",
-            language, settings.DEFAULT_LANGUAGE,
+            language,
+            settings.DEFAULT_LANGUAGE,
         )
 
     # ---- Speaker resolution ------------------------------------------
@@ -145,7 +146,10 @@ async def submit_tts(body: TtsRequest, request: Request) -> TtsJobResponse:
 
     logger.info(
         "TTS request | lang=%s | speaker=%s | text_len=%d | format=%s",
-        language, speaker_id, len(body.text), body.format,
+        language,
+        speaker_id,
+        len(body.text),
+        body.format,
     )
 
     # ---- Create job --------------------------------------------------
@@ -175,9 +179,7 @@ async def submit_tts(body: TtsRequest, request: Request) -> TtsJobResponse:
     outputs_dir = settings.OUTPUTS_DIR
 
     async def on_complete(worker: WorkerHandle, result: SynthesisResult) -> None:
-        await job_store.mark_running(
-            job.job_id, worker.worker_id, worker.gpu_index
-        )
+        await job_store.mark_running(job.job_id, worker.worker_id, worker.gpu_index)
         if result.error:
             await job_store.mark_failed(job.job_id, result.error)
             return
@@ -194,7 +196,9 @@ async def submit_tts(body: TtsRequest, request: Request) -> TtsJobResponse:
         await job_store.mark_done(job.job_id, audio_path)
         logger.info(
             "Response ready | job_id=%s | format=%s | size=%d bytes",
-            job.job_id, fmt, size_bytes,
+            job.job_id,
+            fmt,
+            size_bytes,
         )
 
     # ---- Enqueue -------------------------------------------------
@@ -203,7 +207,7 @@ async def submit_tts(body: TtsRequest, request: Request) -> TtsJobResponse:
     except QueueFullError as exc:
         # Job was created but never dispatched — mark it failed and surface 503.
         await job_store.mark_failed(job.job_id, str(exc))
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return TtsJobResponse(
         job_id=job.job_id,
@@ -215,6 +219,7 @@ async def submit_tts(body: TtsRequest, request: Request) -> TtsJobResponse:
 # ---------------------------------------------------------------------------
 # GET /v1/tts/{job_id}/audio — download finished audio
 # ---------------------------------------------------------------------------
+
 
 @router.get(
     "/{job_id}/audio",
@@ -263,6 +268,7 @@ async def get_audio(job_id: str, request: Request):
 # Internal helper
 # ---------------------------------------------------------------------------
 
+
 def _resolve_speaker(
     body: TtsRequest,
     state,
@@ -285,12 +291,12 @@ def _resolve_speaker(
     if body.speaker_name is not None:
         try:
             record = state.speaker_store.get(body.speaker_name)
-        except SpeakerNotFoundError:
+        except SpeakerNotFoundError as exc:
             logger.warning("Speaker not found: %s", body.speaker_name)
             raise HTTPException(
                 status_code=404,
                 detail=f"Speaker '{body.speaker_name}' not found.",
-            )
+            ) from exc
         return record.gpt_cond_latent, record.speaker_embedding, body.speaker_name
 
     # Neither provided.

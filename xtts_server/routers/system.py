@@ -19,9 +19,9 @@ in main.py.
 import platform
 import time
 
-import torch
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
+import torch
 
 from logging_config import get_logger
 
@@ -33,9 +33,10 @@ router = APIRouter(tags=["system"])
 # Response models
 # ---------------------------------------------------------------------------
 
+
 class HealthResponse(BaseModel):
-    status: str       # always "ok" when the server is reachable
-    uptime_s: float   # seconds since the server started
+    status: str  # always "ok" when the server is reachable
+    uptime_s: float  # seconds since the server started
 
 
 class GpuInfo(BaseModel):
@@ -70,7 +71,7 @@ class JobCounts(BaseModel):
 
 
 class SystemInfoResponse(BaseModel):
-    server_start_time: float      # unix timestamp
+    server_start_time: float  # unix timestamp
     uptime_s: float
     python_version: str
     torch_version: str
@@ -84,6 +85,7 @@ class SystemInfoResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
 
 @router.get(
     "/health",
@@ -114,18 +116,20 @@ async def system_info(request: Request) -> SystemInfoResponse:
     if torch.cuda.is_available():
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
-            total_mb  = props.total_memory / (1024 ** 2)
-            used_mb   = torch.cuda.memory_allocated(i) / (1024 ** 2)
-            free_mb   = total_mb - used_mb
-            util_pct  = (used_mb / total_mb * 100) if total_mb > 0 else 0.0
-            gpus.append(GpuInfo(
-                index=i,
-                name=props.name,
-                total_vram_mb=round(total_mb, 1),
-                used_vram_mb=round(used_mb, 1),
-                free_vram_mb=round(free_mb, 1),
-                utilisation_pct=round(util_pct, 1),
-            ))
+            total_mb = props.total_memory / (1024**2)
+            used_mb = torch.cuda.memory_allocated(i) / (1024**2)
+            free_mb = total_mb - used_mb
+            util_pct = (used_mb / total_mb * 100) if total_mb > 0 else 0.0
+            gpus.append(
+                GpuInfo(
+                    index=i,
+                    name=props.name,
+                    total_vram_mb=round(total_mb, 1),
+                    used_vram_mb=round(used_mb, 1),
+                    free_vram_mb=round(free_mb, 1),
+                    utilisation_pct=round(util_pct, 1),
+                )
+            )
 
     # ---- Worker stats -------------------------------------------------
     raw_workers = state.dispatcher.worker_stats()
@@ -141,7 +145,10 @@ async def system_info(request: Request) -> SystemInfoResponse:
 
     logger.debug(
         "system_info — uptime=%.1fs workers=%d queue=%d jobs_total=%d",
-        uptime, len(workers), queue.depth, jobs.total,
+        uptime,
+        len(workers),
+        queue.depth,
+        jobs.total,
     )
 
     return SystemInfoResponse(

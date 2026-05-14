@@ -1,6 +1,5 @@
 import os
 import sys
-from typing import List, Optional
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -10,8 +9,23 @@ from logging_config import get_logger
 logger = get_logger(__name__)
 
 SUPPORTED_LANGUAGES = [
-    "en", "es", "fr", "de", "it", "pt", "pl", "tr",
-    "ru", "nl", "cs", "ar", "zh-cn", "ja", "hu", "ko", "hi",
+    "en",
+    "es",
+    "fr",
+    "de",
+    "it",
+    "pt",
+    "pl",
+    "tr",
+    "ru",
+    "nl",
+    "cs",
+    "ar",
+    "zh-cn",
+    "ja",
+    "hu",
+    "ko",
+    "hi",
 ]
 
 _REQUIRED_MODEL_FILES = ["config.json", "model.pth", "vocab.json"]
@@ -23,8 +37,8 @@ class Settings(BaseSettings):
     MODEL_PATH: str  # required — no default; startup aborts if unset
 
     # GPU / worker topology
-    NUM_GPUS: Optional[int] = None  # None → auto-detect at runtime
-    WORKERS_PER_GPU: str = "1"      # plain int or comma-separated list
+    NUM_GPUS: int | None = None  # None → auto-detect at runtime
+    WORKERS_PER_GPU: str = "1"  # plain int or comma-separated list
 
     # Language
     DEFAULT_LANGUAGE: str = "tr"
@@ -47,7 +61,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     # ---- Derived fields (populated by validators) ----
-    workers_per_gpu_list: List[int] = []  # parsed from WORKERS_PER_GPU
+    workers_per_gpu_list: list[int] = []  # parsed from WORKERS_PER_GPU
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -64,9 +78,7 @@ class Settings(BaseSettings):
         parts = [p.strip() for p in v.split(",")]
         for p in parts:
             if not p.isdigit() or int(p) < 1:
-                raise ValueError(
-                    f"WORKERS_PER_GPU must be positive integers, got: '{p}'"
-                )
+                raise ValueError(f"WORKERS_PER_GPU must be positive integers, got: '{p}'")
         return v
 
     @model_validator(mode="after")
@@ -101,7 +113,7 @@ def _validate_model_path(model_path: str) -> None:
         logger.error("MODEL_PATH does not exist or is not a directory: %s", model_path)
         sys.exit(1)
 
-    missing: List[str] = []
+    missing: list[str] = []
     for fname in _REQUIRED_MODEL_FILES:
         fpath = os.path.join(model_path, fname)
         if os.path.isfile(fpath):

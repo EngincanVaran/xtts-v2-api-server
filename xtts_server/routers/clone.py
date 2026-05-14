@@ -26,8 +26,6 @@ Accepted audio formats
 """
 
 import os
-import shutil
-import tempfile
 import uuid
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -49,6 +47,7 @@ _MAX_AUDIO_BYTES = 10 * 1024 * 1024
 # Response model
 # ---------------------------------------------------------------------------
 
+
 class CloneResponse(BaseModel):
     speaker_name: str
     created_at: str
@@ -58,6 +57,7 @@ class CloneResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # POST /v1/clone
 # ---------------------------------------------------------------------------
+
 
 @router.post(
     "",
@@ -103,7 +103,9 @@ async def clone_speaker(
 
     logger.info(
         "Clone request | speaker_name=%s | filename=%s | content_type=%s",
-        speaker_name, audio.filename, audio.content_type,
+        speaker_name,
+        audio.filename,
+        audio.content_type,
     )
 
     # ---- Read and size-check the upload ------------------------------
@@ -136,7 +138,8 @@ async def clone_speaker(
 
         logger.info(
             "Reference audio saved to temp | path=%s | size=%d bytes",
-            tmp_path, len(audio_bytes),
+            tmp_path,
+            len(audio_bytes),
         )
 
         # ---- Dispatch latent computation to a worker ----------------
@@ -146,7 +149,8 @@ async def clone_speaker(
         if latents_result.error:
             logger.error(
                 "Latent computation failed | speaker=%s | error=%s",
-                speaker_name, latents_result.error[:300],
+                speaker_name,
+                latents_result.error[:300],
             )
             raise HTTPException(
                 status_code=500,
@@ -184,9 +188,11 @@ async def clone_speaker(
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _validate_speaker_name(name: str) -> None:
     """Allow alphanumeric characters, hyphens, and underscores only."""
     import re
+
     if not name:
         raise HTTPException(status_code=422, detail="speaker_name must not be empty.")
     if len(name) > 64:
@@ -198,8 +204,7 @@ def _validate_speaker_name(name: str) -> None:
         raise HTTPException(
             status_code=422,
             detail=(
-                "speaker_name may only contain letters, digits, "
-                "hyphens (-), and underscores (_)."
+                "speaker_name may only contain letters, digits, hyphens (-), and underscores (_)."
             ),
         )
 

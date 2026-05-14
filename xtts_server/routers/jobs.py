@@ -30,6 +30,7 @@ router = APIRouter(prefix="/v1/jobs", tags=["jobs"])
 # Response models
 # ---------------------------------------------------------------------------
 
+
 class JobResponse(BaseModel):
     job_id: str
     status: str
@@ -49,11 +50,7 @@ class JobResponse(BaseModel):
 
 
 def _job_to_response(job: Job) -> JobResponse:
-    audio_url = (
-        f"/v1/tts/{job.job_id}/audio"
-        if job.status == JobStatus.DONE
-        else None
-    )
+    audio_url = f"/v1/tts/{job.job_id}/audio" if job.status == JobStatus.DONE else None
     return JobResponse(
         job_id=job.job_id,
         status=job.status.value,
@@ -73,6 +70,7 @@ def _job_to_response(job: Job) -> JobResponse:
 # ---------------------------------------------------------------------------
 # GET /v1/jobs/{job_id}
 # ---------------------------------------------------------------------------
+
 
 @router.get(
     "/{job_id}",
@@ -97,6 +95,7 @@ async def get_job(job_id: str, request: Request) -> JobResponse:
 # ---------------------------------------------------------------------------
 # GET /v1/jobs
 # ---------------------------------------------------------------------------
+
 
 class JobListResponse(BaseModel):
     total: int

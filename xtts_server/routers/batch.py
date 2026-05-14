@@ -28,18 +28,16 @@ import multiprocessing
 import os
 from typing import Annotated
 
-import numpy as np
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from audio import AudioFormat, SUPPORTED_FORMATS, output_filename, save_audio
+from audio import SUPPORTED_FORMATS, AudioFormat, output_filename, save_audio
 from config import SUPPORTED_LANGUAGES
 from dispatcher import WorkerHandle
 from job_store import JobStore
 from logging_config import get_logger
 from queue_manager import QueueFullError
 from routers.tts import _resolve_speaker  # reuse speaker resolution logic
-from speakers import SpeakerNotFoundError
 from worker import SynthesisRequest, SynthesisResult
 
 logger = get_logger(__name__)
@@ -52,6 +50,7 @@ MAX_BATCH_SIZE = 50
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
+
 
 class BatchItem(BaseModel):
     text: str = Field(..., description="Text to synthesise for this item.")
@@ -70,9 +69,9 @@ class BatchRequest(BaseModel):
 
 
 class BatchJobEntry(BaseModel):
-    index: int          # 0-based position in the submitted batch
+    index: int  # 0-based position in the submitted batch
     job_id: str
-    status: str         # always "pending" on creation
+    status: str  # always "pending" on creation
     poll_url: str
 
 
@@ -84,6 +83,7 @@ class BatchResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # POST /v1/batch
 # ---------------------------------------------------------------------------
+
 
 @router.post(
     "",
@@ -102,7 +102,7 @@ async def submit_batch(body: BatchRequest, request: Request) -> BatchResponse:
 
     # ---- Validate all items before creating any jobs -----------------
     # Fail fast before touching the queue so the client gets a clean error.
-    resolved: list[tuple] = []   # (item, language, gpt_latent, speaker_emb, speaker_id)
+    resolved: list[tuple] = []  # (item, language, gpt_latent, speaker_emb, speaker_id)
 
     for idx, item in enumerate(body.items):
         if len(item.text) > settings.MAX_TEXT_LENGTH:
@@ -121,9 +121,7 @@ async def submit_batch(body: BatchRequest, request: Request) -> BatchResponse:
                 detail=f"Item {idx}: unsupported language '{language}'.",
             )
         if language != settings.DEFAULT_LANGUAGE:
-            logger.warning(
-                "Batch item %d — non-default language: %s", idx, language
-            )
+            logger.warning("Batch item %d — non-default language: %s", idx, language)
 
         if item.format not in SUPPORTED_FORMATS:
             raise HTTPException(
@@ -137,7 +135,7 @@ async def submit_batch(body: BatchRequest, request: Request) -> BatchResponse:
             raise HTTPException(
                 status_code=exc.status_code,
                 detail=f"Item {idx}: {exc.detail}",
-            )
+            ) from exc
 
         resolved.append((item, language, gpt_lat, spk_emb, spk_id))
 
@@ -194,7 +192,9 @@ async def submit_batch(body: BatchRequest, request: Request) -> BatchResponse:
             await job_store.mark_done(_job_id, audio_path)
             logger.info(
                 "Batch item done | job_id=%s | format=%s | size=%d bytes",
-                _job_id, _fmt, size_bytes,
+                _job_id,
+                _fmt,
+                size_bytes,
             )
 
         try:
@@ -204,13 +204,15 @@ async def submit_batch(body: BatchRequest, request: Request) -> BatchResponse:
             # so the store doesn't accumulate ghost PENDING entries.
             for jid in created_job_ids:
                 await job_store.mark_failed(jid, str(exc))
-            raise HTTPException(status_code=503, detail=str(exc))
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-        job_entries.append(BatchJobEntry(
-            index=idx,
-            job_id=job.job_id,
-            status="pending",
-            poll_url=f"/v1/jobs/{job.job_id}",
-        ))
+        job_entries.append(
+            BatchJobEntry(
+                index=idx,
+                job_id=job.job_id,
+                status="pending",
+                poll_url=f"/v1/jobs/{job.job_id}",
+            )
+        )
 
     return BatchResponse(total=len(job_entries), jobs=job_entries)

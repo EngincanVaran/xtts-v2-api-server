@@ -12,27 +12,26 @@ multiprocessing.Queue without GPU-to-GPU transfer issues.
 Shutdown: put None on request_queue.
 """
 
+from dataclasses import dataclass, field
+from multiprocessing import Queue
 import os
 import sys
 import time
 import traceback
-from dataclasses import dataclass, field
-from multiprocessing import Queue
-from typing import Optional
 
 import numpy as np
-
 
 # ---------------------------------------------------------------------------
 # Request / result data classes  (imported by dispatcher and routers too)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class SynthesisRequest:
     job_id: str
     text: str
     language: str
-    gpt_cond_latent: np.ndarray    # float32, CPU numpy — shape (1, T, 1024)
+    gpt_cond_latent: np.ndarray  # float32, CPU numpy — shape (1, T, 1024)
     speaker_embedding: np.ndarray  # float32, CPU numpy — shape (1, 512)
     result_queue: object = field(repr=False)  # Queue[SynthesisResult]
 
@@ -50,41 +49,42 @@ class StreamSynthesisRequest:
 @dataclass
 class ComputeLatentsRequest:
     job_id: str
-    wav_path: str                  # absolute path to reference wav
+    wav_path: str  # absolute path to reference wav
     result_queue: object = field(repr=False)  # Queue[LatentsResult]
 
 
 @dataclass
 class SynthesisResult:
     job_id: str
-    audio: Optional[np.ndarray]   # float32, shape (N,), 24 kHz
+    audio: np.ndarray | None  # float32, shape (N,), 24 kHz
     sample_rate: int = 24000
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
 class SynthesisChunk:
     job_id: str
-    chunk: np.ndarray              # float32 PCM chunk
+    chunk: np.ndarray  # float32 PCM chunk
 
 
 @dataclass
 class SynthesisStreamEnd:
     job_id: str
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
 class LatentsResult:
     job_id: str
-    gpt_cond_latent: Optional[np.ndarray] = None   # float32 CPU numpy
-    speaker_embedding: Optional[np.ndarray] = None  # float32 CPU numpy
-    error: Optional[str] = None
+    gpt_cond_latent: np.ndarray | None = None  # float32 CPU numpy
+    speaker_embedding: np.ndarray | None = None  # float32 CPU numpy
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # Worker entry point
 # ---------------------------------------------------------------------------
+
 
 def worker_main(
     worker_id: str,
@@ -93,11 +93,14 @@ def worker_main(
     request_queue: Queue,
 ) -> None:
     from logging_config import get_logger
+
     logger = get_logger(f"worker.{worker_id}")
 
     logger.info(
         "Worker %s starting — gpu_index=%d, model_path=%s",
-        worker_id, gpu_index, model_path,
+        worker_id,
+        gpu_index,
+        model_path,
     )
 
     # ---- Device -------------------------------------------------------
@@ -107,10 +110,13 @@ def worker_main(
         device = f"cuda:{gpu_index}"
         props = torch.cuda.get_device_properties(gpu_index)
         device_name = props.name
-        total_vram_gb = props.total_memory / (1024 ** 3)
+        total_vram_gb = props.total_memory / (1024**3)
         logger.info(
             "Worker %s — device=%s name='%s' total_vram=%.2f GB",
-            worker_id, device, device_name, total_vram_gb,
+            worker_id,
+            device,
+            device_name,
+            total_vram_gb,
         )
     else:
         device = "cpu"
@@ -137,7 +143,7 @@ def worker_main(
     logger.info("Worker %s — model loaded in %.2f s", worker_id, elapsed)
 
     if device.startswith("cuda"):
-        vram_mb = torch.cuda.memory_allocated(gpu_index) / (1024 ** 2)
+        vram_mb = torch.cuda.memory_allocated(gpu_index) / (1024**2)
         logger.info("Worker %s — VRAM after load: %.1f MB", worker_id, vram_mb)
 
     # ---- Stats -----------------------------------------------------------
@@ -173,7 +179,9 @@ def worker_main(
     avg = total_synthesis_ms / total_requests if total_requests else 0.0
     logger.info(
         "Worker %s — shutdown complete | total=%d | avg_ms=%.1f",
-        worker_id, total_requests, avg,
+        worker_id,
+        total_requests,
+        avg,
     )
 
 
@@ -181,20 +189,29 @@ def worker_main(
 # Handlers
 # ---------------------------------------------------------------------------
 
+
 def _to_tensor(arr: np.ndarray, device: str):
     import torch
+
     return torch.from_numpy(arr).to(device)
 
 
 def _handle_synthesis(
-    request: SynthesisRequest, model, device: str, gpu_index: int,
-    worker_id: str, logger,
+    request: SynthesisRequest,
+    model,
+    device: str,
+    gpu_index: int,
+    worker_id: str,
+    logger,
 ) -> float:
     elapsed_ms = 0.0  # guard: ensure always defined even if put() raises
     text_preview = request.text[:60].replace("\n", " ")
     logger.info(
         "Worker %s — inference start | job=%s | lang=%s | text='%s…'",
-        worker_id, request.job_id, request.language, text_preview,
+        worker_id,
+        request.job_id,
+        request.language,
+        text_preview,
     )
 
     t0 = time.monotonic()
@@ -216,41 +233,52 @@ def _handle_synthesis(
 
         logger.info(
             "Worker %s — inference done | job=%s | ms=%.1f | audio_s=%.2f | RTF=%.2f",
-            worker_id, request.job_id, elapsed_ms, audio_s, rtf,
+            worker_id,
+            request.job_id,
+            elapsed_ms,
+            audio_s,
+            rtf,
         )
 
         import torch
+
         if device.startswith("cuda"):
-            vram_mb = torch.cuda.memory_allocated(gpu_index) / (1024 ** 2)
+            vram_mb = torch.cuda.memory_allocated(gpu_index) / (1024**2)
             logger.debug("Worker %s — VRAM after inference: %.1f MB", worker_id, vram_mb)
 
-        request.result_queue.put(
-            SynthesisResult(job_id=request.job_id, audio=audio)
-        )
+        request.result_queue.put(SynthesisResult(job_id=request.job_id, audio=audio))
 
     except Exception:
         elapsed_ms = (time.monotonic() - t0) * 1000
         tb = traceback.format_exc()
         logger.error(
             "Worker %s — inference exception | job=%s | text='%s…'\n%s",
-            worker_id, request.job_id, text_preview, tb,
+            worker_id,
+            request.job_id,
+            text_preview,
+            tb,
         )
-        request.result_queue.put(
-            SynthesisResult(job_id=request.job_id, audio=None, error=tb)
-        )
+        request.result_queue.put(SynthesisResult(job_id=request.job_id, audio=None, error=tb))
 
     return elapsed_ms
 
 
 def _handle_stream(
-    request: StreamSynthesisRequest, model, device: str, gpu_index: int,
-    worker_id: str, logger,
+    request: StreamSynthesisRequest,
+    model,
+    device: str,
+    gpu_index: int,
+    worker_id: str,
+    logger,
 ) -> float:
     elapsed_ms = 0.0  # guard: ensure always defined even if put() raises
     text_preview = request.text[:60].replace("\n", " ")
     logger.info(
         "Worker %s — stream start | job=%s | lang=%s | text='%s…'",
-        worker_id, request.job_id, request.language, text_preview,
+        worker_id,
+        request.job_id,
+        request.language,
+        text_preview,
     )
 
     t0 = time.monotonic()
@@ -268,15 +296,16 @@ def _handle_stream(
             speaker_embedding,
         ):
             chunk_np = np.array(chunk, dtype=np.float32)
-            request.result_queue.put(
-                SynthesisChunk(job_id=request.job_id, chunk=chunk_np)
-            )
+            request.result_queue.put(SynthesisChunk(job_id=request.job_id, chunk=chunk_np))
             chunk_count += 1
 
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.info(
             "Worker %s — stream done | job=%s | ms=%.1f | chunks=%d",
-            worker_id, request.job_id, elapsed_ms, chunk_count,
+            worker_id,
+            request.job_id,
+            elapsed_ms,
+            chunk_count,
         )
         request.result_queue.put(SynthesisStreamEnd(job_id=request.job_id))
 
@@ -285,21 +314,27 @@ def _handle_stream(
         tb = traceback.format_exc()
         logger.error(
             "Worker %s — stream exception | job=%s | text='%s…'\n%s",
-            worker_id, request.job_id, text_preview, tb,
+            worker_id,
+            request.job_id,
+            text_preview,
+            tb,
         )
-        request.result_queue.put(
-            SynthesisStreamEnd(job_id=request.job_id, error=tb)
-        )
+        request.result_queue.put(SynthesisStreamEnd(job_id=request.job_id, error=tb))
 
     return elapsed_ms
 
 
 def _handle_compute_latents(
-    request: ComputeLatentsRequest, model, worker_id: str, logger,
+    request: ComputeLatentsRequest,
+    model,
+    worker_id: str,
+    logger,
 ) -> None:
     logger.info(
         "Worker %s — computing latents | job=%s | wav=%s",
-        worker_id, request.job_id, request.wav_path,
+        worker_id,
+        request.job_id,
+        request.wav_path,
     )
     try:
         gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
@@ -313,7 +348,8 @@ def _handle_compute_latents(
         logger.info(
             "Worker %s — latents computed | job=%s | "
             "gpt_cond_latent.shape=%s | speaker_embedding.shape=%s",
-            worker_id, request.job_id,
+            worker_id,
+            request.job_id,
             result.gpt_cond_latent.shape,
             result.speaker_embedding.shape,
         )
@@ -321,7 +357,9 @@ def _handle_compute_latents(
         tb = traceback.format_exc()
         logger.error(
             "Worker %s — compute_latents exception | job=%s\n%s",
-            worker_id, request.job_id, tb,
+            worker_id,
+            request.job_id,
+            tb,
         )
         result = LatentsResult(job_id=request.job_id, error=tb)
 
@@ -331,6 +369,7 @@ def _handle_compute_latents(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _validate_model_path(model_path: str, worker_id: str, logger) -> None:
     required = ["config.json", "model.pth", "vocab.json"]
@@ -343,7 +382,7 @@ def _validate_model_path(model_path: str, worker_id: str, logger) -> None:
     for fname in required:
         fpath = os.path.join(model_path, fname)
         if os.path.isfile(fpath):
-            size_mb = os.path.getsize(fpath) / (1024 ** 2)
+            size_mb = os.path.getsize(fpath) / (1024**2)
             logger.info("Worker %s — [FOUND] %s (%.2f MB)", worker_id, fname, size_mb)
         else:
             logger.error("Worker %s — [MISSING] %s", worker_id, fname)
@@ -352,6 +391,7 @@ def _validate_model_path(model_path: str, worker_id: str, logger) -> None:
     if missing:
         logger.error(
             "Worker %s — missing required files: %s — aborting",
-            worker_id, ", ".join(missing),
+            worker_id,
+            ", ".join(missing),
         )
         sys.exit(1)

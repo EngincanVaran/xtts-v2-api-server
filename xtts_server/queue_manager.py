@@ -28,9 +28,11 @@ Two submission paths
 """
 
 import asyncio
-import time
+from collections.abc import Awaitable, Callable
+import contextlib
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+import time
+from typing import Any
 
 from dispatcher import Dispatcher, WorkerHandle
 from logging_config import get_logger
@@ -47,20 +49,22 @@ class QueueFullError(Exception):
 # Internal envelope — wraps a request with metadata for the drain loop
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _QueuedItem:
-    request: Any                    # SynthesisRequest | StreamSynthesisRequest
+    request: Any  # SynthesisRequest | StreamSynthesisRequest
     enqueued_at: float = field(default_factory=time.monotonic)
     # on_complete is None for streaming jobs; the WS handler owns the result.
-    on_complete: Optional[Callable[[WorkerHandle, SynthesisResult], Awaitable[None]]] = None
+    on_complete: Callable[[WorkerHandle, SynthesisResult], Awaitable[None]] | None = None
     # Resolved by the drain loop once dispatched; lets the WS handler learn
     # which worker was assigned so it can call dispatcher.release() correctly.
-    worker_future: Optional[asyncio.Future] = None
+    worker_future: asyncio.Future | None = None
 
 
 # ---------------------------------------------------------------------------
 # QueueManager
 # ---------------------------------------------------------------------------
+
 
 class QueueManager:
     def __init__(self, dispatcher: Dispatcher, max_queue_size: int) -> None:
@@ -68,7 +72,7 @@ class QueueManager:
         self._max_size = max_queue_size
         # asyncio.Queue with a hard size cap — put_nowait raises QueueFull when full.
         self._queue: asyncio.Queue[_QueuedItem] = asyncio.Queue(maxsize=max_queue_size)
-        self._drain_task: Optional[asyncio.Task] = None
+        self._drain_task: asyncio.Task | None = None
         logger.info("QueueManager initialised — max_queue_size=%d", max_queue_size)
 
     # ------------------------------------------------------------------
@@ -83,10 +87,8 @@ class QueueManager:
     async def shutdown(self) -> None:
         if self._drain_task:
             self._drain_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._drain_task
-            except asyncio.CancelledError:
-                pass
         logger.info("QueueManager shut down")
 
     # ------------------------------------------------------------------
@@ -107,7 +109,9 @@ class QueueManager:
         item = _QueuedItem(request=request, on_complete=on_complete)
         self._enqueue(item, request.job_id)
 
-    async def submit_stream(self, request: StreamSynthesisRequest) -> "asyncio.Future[WorkerHandle]":
+    async def submit_stream(
+        self, request: StreamSynthesisRequest
+    ) -> "asyncio.Future[WorkerHandle]":
         """
         Enqueue a streaming request.
 
@@ -129,17 +133,22 @@ class QueueManager:
         except asyncio.QueueFull:
             logger.error(
                 "Queue full — rejecting job=%s | depth=%d | max=%d",
-                job_id, depth, self._max_size,
+                job_id,
+                depth,
+                self._max_size,
             )
             raise QueueFullError(
                 f"Request queue is full ({depth}/{self._max_size}). Try again later."
-            )
+            ) from None
 
         # +1 because we just added to the queue
         position = self._queue.qsize()
         logger.info(
             "Enqueued job=%s | position≈%d | depth=%d/%d",
-            job_id, position, position, self._max_size,
+            job_id,
+            position,
+            position,
+            self._max_size,
         )
 
     # ------------------------------------------------------------------
@@ -162,7 +171,9 @@ class QueueManager:
             wait_ms = (time.monotonic() - item.enqueued_at) * 1000
             logger.info(
                 "Dequeued job=%s | queue_wait_ms=%.1f | remaining_queue=%d",
-                item.request.job_id, wait_ms, self._queue.qsize(),
+                item.request.job_id,
+                wait_ms,
+                self._queue.qsize(),
             )
 
             # Wait for a worker that has no active requests before dispatching.
@@ -174,10 +185,12 @@ class QueueManager:
             if item.on_complete is not None:
                 # Async job — spawn a task to collect the result without blocking
                 # the drain loop (we want to keep draining for other requests).
-                asyncio.create_task(
+                # Store the reference to avoid it being garbage-collected (RUF006).
+                _task = asyncio.create_task(
                     self._collect_result(worker, item.request, item.on_complete),
                     name=f"collect-{item.request.job_id}",
                 )
+                del _task  # intentionally fire-and-forget; name kept for debuggability
             # For streaming requests on_complete is None; the WS handler owns
             # result_queue and will call dispatcher.release() when done.
             # Resolve the future so the WS handler unblocks and learns worker_id.
@@ -198,15 +211,15 @@ class QueueManager:
         t0 = time.monotonic()
 
         try:
-            result: SynthesisResult = await loop.run_in_executor(
-                None, request.result_queue.get
-            )
+            result: SynthesisResult = await loop.run_in_executor(None, request.result_queue.get)
             elapsed_ms = (time.monotonic() - t0) * 1000
         except Exception as exc:
             # Should not normally happen, but guard defensively.
             logger.error(
                 "Result collection error | job=%s | worker=%s | %s",
-                request.job_id, worker.worker_id, exc,
+                request.job_id,
+                worker.worker_id,
+                exc,
             )
             elapsed_ms = (time.monotonic() - t0) * 1000
             result = SynthesisResult(job_id=request.job_id, audio=None, error=str(exc))

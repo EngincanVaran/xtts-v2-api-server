@@ -22,10 +22,9 @@ Dispatcher.make_queue() everywhere a result queue is needed.
 """
 
 import asyncio
+import contextlib
+from dataclasses import dataclass
 import multiprocessing
-import time
-from dataclasses import dataclass, field
-from typing import List, Optional
 
 from logging_config import get_logger
 from worker import (
@@ -47,6 +46,7 @@ _MP_CTX = multiprocessing.get_context("spawn")
 # Per-worker state
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class WorkerHandle:
     worker_id: str
@@ -62,16 +62,17 @@ class WorkerHandle:
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+
 class Dispatcher:
-    def __init__(self, model_path: str, workers_per_gpu_list: List[int]) -> None:
+    def __init__(self, model_path: str, workers_per_gpu_list: list[int]) -> None:
         self._model_path = model_path
         self._workers_per_gpu = workers_per_gpu_list
-        self._workers: List[WorkerHandle] = []
+        self._workers: list[WorkerHandle] = []
         # Single Condition for all active_requests mutations.  Its internal
         # lock is held by dispatch(), release(), and wait_for_free_worker().
         # Initialized lazily on first use so it binds to the running event loop.
-        self._cond: Optional[asyncio.Condition] = None
-        self._status_task: Optional[asyncio.Task] = None
+        self._cond: asyncio.Condition | None = None
+        self._status_task: asyncio.Task | None = None
 
     def _get_cond(self) -> asyncio.Condition:
         """Return the Condition, creating it lazily inside a running loop."""
@@ -88,13 +89,15 @@ class Dispatcher:
         total = sum(self._workers_per_gpu)
         logger.info(
             "Dispatcher — spawning %d worker(s) across %d GPU slot(s)",
-            total, len(self._workers_per_gpu),
+            total,
+            len(self._workers_per_gpu),
         )
 
         # Import torch only for the device-name lookup — keep CUDA init out of
         # the main process as much as possible to avoid re-init errors in workers.
         try:
             import torch
+
             cuda_ok = torch.cuda.is_available()
         except ImportError:
             cuda_ok = False
@@ -102,10 +105,8 @@ class Dispatcher:
         for gpu_index, count in enumerate(self._workers_per_gpu):
             device_name = "CPU"
             if cuda_ok:
-                try:
+                with contextlib.suppress(Exception):
                     device_name = torch.cuda.get_device_name(gpu_index)
-                except Exception:
-                    pass
 
             for slot in range(count):
                 worker_id = f"gpu{gpu_index}-w{slot}"
@@ -127,7 +128,10 @@ class Dispatcher:
                 )
                 logger.info(
                     "Spawned worker %s on GPU %d (%s) — PID %d",
-                    worker_id, gpu_index, device_name, p.pid,
+                    worker_id,
+                    gpu_index,
+                    device_name,
+                    p.pid,
                 )
 
         logger.info("Dispatcher — all workers spawned")
@@ -190,7 +194,10 @@ class Dispatcher:
 
         logger.info(
             "Dispatched job=%s → worker=%s (gpu=%d, active=%d)",
-            request.job_id, worker.worker_id, worker.gpu_index, worker.active_requests,
+            request.job_id,
+            worker.worker_id,
+            worker.gpu_index,
+            worker.active_requests,
         )
         return worker
 
@@ -264,7 +271,7 @@ class Dispatcher:
             while self.all_busy():
                 await cond.wait()
 
-    def worker_stats(self) -> List[dict]:
+    def worker_stats(self) -> list[dict]:
         """Snapshot of per-worker stats. Used for /v1/system/info and logging."""
         return [
             {
@@ -273,8 +280,7 @@ class Dispatcher:
                 "active_requests": w.active_requests,
                 "total_requests": w.total_requests,
                 "avg_synthesis_ms": (
-                    w.total_synthesis_ms / w.total_requests
-                    if w.total_requests else 0.0
+                    w.total_synthesis_ms / w.total_requests if w.total_requests else 0.0
                 ),
                 "alive": w.process.is_alive(),
             }
@@ -297,27 +303,31 @@ class Dispatcher:
     def _log_status(self) -> None:
         logger.info("--- Periodic worker status ---")
         for w in self._workers:
-            avg_ms = (
-                w.total_synthesis_ms / w.total_requests
-                if w.total_requests else 0.0
-            )
+            avg_ms = w.total_synthesis_ms / w.total_requests if w.total_requests else 0.0
             logger.info(
                 "  worker=%s gpu=%d active=%d total=%d avg_ms=%.1f alive=%s",
-                w.worker_id, w.gpu_index,
-                w.active_requests, w.total_requests,
-                avg_ms, w.process.is_alive(),
+                w.worker_id,
+                w.gpu_index,
+                w.active_requests,
+                w.total_requests,
+                avg_ms,
+                w.process.is_alive(),
             )
 
         # Lazy torch import — avoid pulling CUDA into the main process at module load.
         try:
             import torch
+
             if torch.cuda.is_available():
                 for i in range(torch.cuda.device_count()):
-                    used_mb  = torch.cuda.memory_allocated(i) / (1024 ** 2)
-                    total_mb = torch.cuda.get_device_properties(i).total_memory / (1024 ** 2)
+                    used_mb = torch.cuda.memory_allocated(i) / (1024**2)
+                    total_mb = torch.cuda.get_device_properties(i).total_memory / (1024**2)
                     logger.info(
                         "  GPU %d VRAM: %.1f / %.1f MB (%.1f%% used)",
-                        i, used_mb, total_mb, 100 * used_mb / total_mb,
+                        i,
+                        used_mb,
+                        total_mb,
+                        100 * used_mb / total_mb,
                     )
         except ImportError:
             pass
