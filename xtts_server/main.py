@@ -25,11 +25,13 @@ OpenAPI docs are available at /docs (Swagger UI) and /redoc.
 """
 
 from contextlib import asynccontextmanager
+import os
 import time
+import uuid
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
-from config import load_settings
+from config import Settings, load_settings
 from dispatcher import Dispatcher
 from job_store import JobStore
 from logging_config import get_logger
@@ -40,6 +42,44 @@ from speakers import SpeakerStore
 from ws.stream import router as ws_router
 
 logger = get_logger(__name__)
+_access_log = get_logger("access")
+
+_VERSION = "1.0.0"
+
+
+def _log_banner(settings: Settings) -> None:
+    """Log a Spring Boot / vLLM style ASCII art banner after settings are loaded."""
+    try:
+        import torch
+        cuda_ok = torch.cuda.is_available()
+    except ImportError:
+        cuda_ok = False
+
+    total_workers = sum(settings.workers_per_gpu_list)
+    device_label = f"{settings.NUM_GPUS} GPU(s)" if cuda_ok else "CPU"
+    worker_label = f"{total_workers} × {device_label}"
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = os.environ.get("PORT", "8000")
+
+    banner = f"""
+  ██████╗ ██╗   ██╗ █████╗  ██╗  ██╗███████╗██████╗       ██╗  ██╗████████╗████████╗███████╗
+  ██╔═══██╗██║   ██║██╔══██╗ ██║ ██╔╝██╔════╝██╔══██╗      ╚██╗██╔╝╚══██╔══╝╚══██╔══╝██╔════╝
+  ██║   ██║██║   ██║███████║ █████╔╝ █████╗  ██████╔╝  ═══  ╚███╔╝    ██║      ██║   ███████╗
+  ██║   ██║██║   ██║██╔══██║ ██╔═██╗ ██╔══╝  ██╔═██╗        ██╔██╗    ██║      ██║   ╚════██║
+  ╚██████╔╝╚██████╔╝██║  ██║ ██║  ██╗███████╗██║  ╚██╗     ██╔╝ ██╗   ██║      ██║   ███████║
+   ╚═════╝  ╚═════╝ ╚═╝  ╚═╝ ╚═╝  ╚═╝╚══════╝╚═╝   ╚═╝     ╚═╝  ╚═╝   ╚═╝      ╚═╝   ╚══════╝
+  ═════════════════════════════════════════════════════════════════════════════════════════════════
+  :: QUAKER-XTTS Inference Server ::                                               (v{_VERSION})
+
+  Model    : {settings.MODEL_PATH}
+  Workers  : {worker_label}
+  Language : {settings.DEFAULT_LANGUAGE}
+  Queue    : max {settings.MAX_QUEUE_SIZE} concurrent requests
+  Endpoint : http://{host}:{port}
+  Docs     : http://{host}:{port}/docs
+  ═════════════════════════════════════════════════════════════════════════════════════════════════"""
+
+    logger.info(banner)
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +99,7 @@ async def lifespan(app: FastAPI):
     # 1. Settings — exits immediately if MODEL_PATH or required files are missing.
     settings = load_settings()
     app.state.settings = settings
+    _log_banner(settings)
 
     # 2. Spawn worker processes synchronously before entering async code.
     #    multiprocessing.Process.start() is not async-safe inside a running
@@ -124,6 +165,35 @@ def create_app() -> FastAPI:
         version="1.0.0",
         lifespan=lifespan,
     )
+
+    # ---- Access log middleware ----------------------------------------
+    # Logs one line per HTTP request: method, path, status, duration, client.
+    # /health is logged at DEBUG to avoid noise from frequent liveness probes.
+    # A unique X-Request-ID is generated (or forwarded from the client) and
+    # attached to every response for client-side correlation.
+    @app.middleware("http")
+    async def _access_log_middleware(request: Request, call_next):
+        req_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:8]
+        client_ip = request.client.host if request.client else "-"
+        t0 = time.monotonic()
+        try:
+            response = await call_next(request)
+        except Exception:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            _access_log.error(
+                "%s %s → 500 | %.1f ms | client=%s | req=%s",
+                request.method, request.url.path, elapsed_ms, client_ip, req_id,
+            )
+            raise
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        log_fn = _access_log.debug if request.url.path == "/health" else _access_log.info
+        log_fn(
+            "%s %s → %d | %.1f ms | client=%s | req=%s",
+            request.method, request.url.path, response.status_code,
+            elapsed_ms, client_ip, req_id,
+        )
+        response.headers["X-Request-ID"] = req_id
+        return response
 
     # ---- Routers -----------------------------------------------------
     app.include_router(system.router)

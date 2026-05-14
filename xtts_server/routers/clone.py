@@ -26,6 +26,7 @@ Accepted audio formats
 """
 
 import os
+import time
 import uuid
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -101,13 +102,6 @@ async def clone_speaker(
             ),
         )
 
-    logger.info(
-        "Clone request | speaker_name=%s | filename=%s | content_type=%s",
-        speaker_name,
-        audio.filename,
-        audio.content_type,
-    )
-
     # ---- Read and size-check the upload ------------------------------
     audio_bytes = await audio.read()
     if not audio_bytes:
@@ -121,6 +115,14 @@ async def clone_speaker(
             ),
         )
 
+    logger.info(
+        "Clone request | speaker_name=%s | filename=%s | content_type=%s | size=%d bytes",
+        speaker_name,
+        audio.filename,
+        audio.content_type,
+        len(audio_bytes),
+    )
+
     # ---- Write to a temp file so we can pass a path to the worker ----
     # We keep it inside SPEAKERS_DIR so the final copy stays on the same
     # filesystem and shutil.copy2 is an O(1) rename rather than a full copy.
@@ -132,6 +134,7 @@ async def clone_speaker(
     tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}{original_ext}")
 
     registered = False
+    t_clone_start = time.monotonic()
     try:
         with open(tmp_path, "wb") as f:
             f.write(audio_bytes)
@@ -144,7 +147,9 @@ async def clone_speaker(
 
         # ---- Dispatch latent computation to a worker ----------------
         job_id = str(uuid.uuid4())
+        t_latents_start = time.monotonic()
         latents_result = await state.dispatcher.compute_latents(job_id, tmp_path)
+        latents_ms = (time.monotonic() - t_latents_start) * 1000
 
         if latents_result.error:
             logger.error(
@@ -156,6 +161,15 @@ async def clone_speaker(
                 status_code=500,
                 detail=f"Failed to compute speaker latents: {latents_result.error[:300]}",
             )
+
+        logger.info(
+            "Latents computed | speaker=%s | latents_ms=%.1f"
+            " | gpt_shape=%s | emb_shape=%s",
+            speaker_name,
+            latents_ms,
+            latents_result.gpt_cond_latent.shape,
+            latents_result.speaker_embedding.shape,
+        )
 
         # ---- Persist speaker to store --------------------------------
         # register() calls shutil.copy2(tmp_path → wav_dest).  We only
@@ -175,7 +189,13 @@ async def clone_speaker(
         if registered and os.path.isfile(tmp_path):
             os.remove(tmp_path)
 
-    logger.info("Speaker registered successfully | name=%s", speaker_name)
+    total_clone_ms = (time.monotonic() - t_clone_start) * 1000
+    logger.info(
+        "Speaker clone complete | name=%s | total_ms=%.1f | latents_ms=%.1f",
+        speaker_name,
+        total_clone_ms,
+        latents_ms,
+    )
 
     return CloneResponse(
         speaker_name=record.name,

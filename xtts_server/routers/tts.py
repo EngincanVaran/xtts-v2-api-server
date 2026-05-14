@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import multiprocessing
 import os
+import time
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request
@@ -303,11 +304,13 @@ async def synthesise_sync(body: TtsRequest, request: Request) -> Response:
             result_future.set_result(result)
 
     try:
+        t_submit = time.monotonic()
         await state.queue_manager.submit_job(synth_request, on_complete)
     except QueueFullError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     result: SynthesisResult = await result_future
+    synthesis_ms = (time.monotonic() - t_submit) * 1000
 
     if result.error:
         logger.error("TTS sync failed | job_id=%s | error=%s", job_id, result.error[:300])
@@ -317,13 +320,22 @@ async def synthesise_sync(body: TtsRequest, request: Request) -> Response:
         )
 
     fmt = body.format
-    audio_data = audio_to_bytes(result.audio, fmt, result.sample_rate)
+    loop = asyncio.get_running_loop()
+    audio_data: bytes = await loop.run_in_executor(
+        None, audio_to_bytes, result.audio, fmt, result.sample_rate
+    )
 
+    audio_s = len(result.audio) / result.sample_rate if result.audio is not None else 0.0
+    rtf = audio_s / (synthesis_ms / 1000) if synthesis_ms > 0 else 0.0
     logger.info(
-        "TTS sync done | job_id=%s | format=%s | size=%d bytes",
+        "TTS sync done | job_id=%s | format=%s | size=%d bytes"
+        " | audio_s=%.2f | synthesis_ms=%.1f | RTF=%.2f",
         job_id,
         fmt,
         len(audio_data),
+        audio_s,
+        synthesis_ms,
+        rtf,
     )
 
     return Response(

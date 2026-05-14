@@ -140,9 +140,10 @@ async def submit_batch(body: BatchRequest, request: Request) -> BatchResponse:
         resolved.append((item, language, gpt_lat, spk_emb, spk_id))
 
     logger.info(
-        "Batch request | items=%d | speakers=%s",
+        "Batch request | items=%d | speakers=%s | formats=%s",
         len(resolved),
-        list({r[4] for r in resolved}),
+        sorted({r[4] for r in resolved}),
+        sorted({r[0].format for r in resolved}),
     )
 
     # ---- Create jobs and enqueue -------------------------------------
@@ -215,4 +216,11 @@ async def submit_batch(body: BatchRequest, request: Request) -> BatchResponse:
             )
         )
 
+    job_ids_preview = [e.job_id for e in job_entries[:3]]
+    logger.info(
+        "Batch accepted | jobs=%d | job_ids=%s%s",
+        len(job_entries),
+        job_ids_preview,
+        " …" if len(job_entries) > 3 else "",
+    )
     return BatchResponse(total=len(job_entries), jobs=job_entries)

@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import json
 import multiprocessing
+import time
 import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -155,8 +156,14 @@ async def stream_tts(websocket: WebSocket) -> None:
         # Block (async) until the drain loop assigns a worker.  This is when
         # the request leaves the asyncio queue and enters a worker process.
         worker = await worker_future
+        logger.info(
+            "Stream dispatched | job_id=%s | worker=%s", job_id, worker.worker_id
+        )
 
         chunk_count = 0
+        total_bytes = 0
+        first_chunk_ms: float | None = None
+        t_stream_start = time.monotonic()
 
         try:
             # try/finally ensures the worker slot is always released, even
@@ -167,11 +174,20 @@ async def stream_tts(websocket: WebSocket) -> None:
                 item = await loop.run_in_executor(None, result_queue.get)
 
                 if isinstance(item, SynthesisChunk):
-                    # Send raw float32 bytes — client knows sample rate is 24 000 Hz.
-                    await websocket.send_bytes(item.chunk.astype(np.float32).tobytes())
+                    raw = item.chunk.astype(np.float32).tobytes()
+                    if first_chunk_ms is None:
+                        first_chunk_ms = (time.monotonic() - t_stream_start) * 1000
+                        logger.info(
+                            "Stream first chunk | job_id=%s | latency_ms=%.1f",
+                            job_id,
+                            first_chunk_ms,
+                        )
+                    await websocket.send_bytes(raw)
                     chunk_count += 1
+                    total_bytes += len(raw)
 
                 elif isinstance(item, SynthesisStreamEnd):
+                    total_ms = (time.monotonic() - t_stream_start) * 1000
                     if item.error:
                         logger.error(
                             "Stream error | job_id=%s | error=%s",
@@ -180,7 +196,21 @@ async def stream_tts(websocket: WebSocket) -> None:
                         )
                         await _close_error(websocket, job_id, item.error[:300])
                     else:
-                        logger.info("Stream done | job_id=%s | chunks=%d", job_id, chunk_count)
+                        # PCM float32 at 24 000 Hz: bytes / 4 / sample_rate = seconds
+                        audio_s = total_bytes / 4 / 24000
+                        rtf = audio_s / (total_ms / 1000) if total_ms > 0 else 0.0
+                        logger.info(
+                            "Stream done | job_id=%s | chunks=%d | bytes=%d"
+                            " | audio_s=%.2f | total_ms=%.1f | RTF=%.2f"
+                            " | first_chunk_ms=%s",
+                            job_id,
+                            chunk_count,
+                            total_bytes,
+                            audio_s,
+                            total_ms,
+                            rtf,
+                            f"{first_chunk_ms:.1f}" if first_chunk_ms is not None else "n/a",
+                        )
                         await websocket.send_text(json.dumps({"status": "done"}))
                         await websocket.close()
                     break

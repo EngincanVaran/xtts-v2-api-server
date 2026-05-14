@@ -118,6 +118,10 @@ def worker_main(
             device_name,
             total_vram_gb,
         )
+
+        # Apply VRAM cap before any GPU memory is allocated.
+        # GPU_MEMORY_FRACTION is exported by start-server.sh; 1.0 means no cap.
+        _apply_memory_fraction(gpu_index, worker_id, logger)
     else:
         device = "cpu"
         device_name = "CPU"
@@ -331,34 +335,41 @@ def _handle_compute_latents(
     logger,
 ) -> None:
     logger.info(
-        "Worker %s — computing latents | job=%s | wav=%s",
+        "Worker %s — compute_latents start | job=%s | wav=%s",
         worker_id,
         request.job_id,
         request.wav_path,
     )
+    t0 = time.monotonic()
     try:
         gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(
             audio_path=[request.wav_path]
         )
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        gpt_np = gpt_cond_latent.cpu().numpy()
+        emb_np = speaker_embedding.cpu().numpy()
         result = LatentsResult(
             job_id=request.job_id,
-            gpt_cond_latent=gpt_cond_latent.cpu().numpy(),
-            speaker_embedding=speaker_embedding.cpu().numpy(),
+            gpt_cond_latent=gpt_np,
+            speaker_embedding=emb_np,
         )
         logger.info(
-            "Worker %s — latents computed | job=%s | "
-            "gpt_cond_latent.shape=%s | speaker_embedding.shape=%s",
+            "Worker %s — compute_latents done | job=%s | elapsed_ms=%.1f"
+            " | gpt_shape=%s | emb_shape=%s",
             worker_id,
             request.job_id,
-            result.gpt_cond_latent.shape,
-            result.speaker_embedding.shape,
+            elapsed_ms,
+            gpt_np.shape,
+            emb_np.shape,
         )
     except Exception:
+        elapsed_ms = (time.monotonic() - t0) * 1000
         tb = traceback.format_exc()
         logger.error(
-            "Worker %s — compute_latents exception | job=%s\n%s",
+            "Worker %s — compute_latents failed | job=%s | elapsed_ms=%.1f\n%s",
             worker_id,
             request.job_id,
+            elapsed_ms,
             tb,
         )
         result = LatentsResult(job_id=request.job_id, error=tb)
@@ -369,6 +380,43 @@ def _handle_compute_latents(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _apply_memory_fraction(gpu_index: int, worker_id: str, logger) -> None:
+    """Cap per-process VRAM usage via GPU_MEMORY_FRACTION env var (set by start-server.sh)."""
+    import torch
+
+    raw = os.environ.get("GPU_MEMORY_FRACTION", "1.0")
+    try:
+        fraction = float(raw)
+    except ValueError:
+        logger.warning(
+            "Worker %s — GPU_MEMORY_FRACTION='%s' is not a valid float — ignoring",
+            worker_id,
+            raw,
+        )
+        return
+
+    if not (0.0 < fraction <= 1.0):
+        logger.warning(
+            "Worker %s — GPU_MEMORY_FRACTION=%.3f is out of range (0, 1] — ignoring",
+            worker_id,
+            fraction,
+        )
+        return
+
+    if fraction < 1.0:
+        torch.cuda.set_per_process_memory_fraction(fraction, gpu_index)
+        props = torch.cuda.get_device_properties(gpu_index)
+        cap_gb = props.total_memory * fraction / (1024**3)
+        logger.info(
+            "Worker %s — VRAM capped at %.0f%% of GPU %d (≈ %.2f GB / %.2f GB total)",
+            worker_id,
+            fraction * 100,
+            gpu_index,
+            cap_gb,
+            props.total_memory / (1024**3),
+        )
 
 
 def _validate_model_path(model_path: str, worker_id: str, logger) -> None:

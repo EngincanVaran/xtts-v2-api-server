@@ -187,7 +187,9 @@ class QueueManager:
                 # the drain loop (we want to keep draining for other requests).
                 # Store the reference to avoid it being garbage-collected (RUF006).
                 _task = asyncio.create_task(
-                    self._collect_result(worker, item.request, item.on_complete),
+                    self._collect_result(
+                        worker, item.request, item.on_complete, item.enqueued_at
+                    ),
                     name=f"collect-{item.request.job_id}",
                 )
                 del _task  # intentionally fire-and-forget; name kept for debuggability
@@ -202,6 +204,7 @@ class QueueManager:
         worker: WorkerHandle,
         request: SynthesisRequest,
         on_complete: Callable[[WorkerHandle, SynthesisResult], Awaitable[None]],
+        enqueued_at: float,
     ) -> None:
         """
         Await the worker's result (blocking get in a thread-pool executor),
@@ -231,6 +234,17 @@ class QueueManager:
 
         # Notify the job store (or whatever the caller registered).
         await on_complete(worker, result)
+
+        # Total lifecycle: from the moment the request entered the asyncio queue
+        # until on_complete finishes (includes queue wait + synthesis + audio save).
+        total_ms = (time.monotonic() - enqueued_at) * 1000
+        logger.info(
+            "Job lifecycle complete | job=%s | worker=%s | synthesis_ms=%.1f | total_ms=%.1f",
+            request.job_id,
+            worker.worker_id,
+            elapsed_ms,
+            total_ms,
+        )
 
     # ------------------------------------------------------------------
     # Observability
