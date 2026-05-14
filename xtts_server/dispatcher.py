@@ -25,6 +25,7 @@ import asyncio
 import contextlib
 from dataclasses import dataclass
 import multiprocessing
+import multiprocessing.managers
 
 from logging_config import get_logger
 from worker import (
@@ -73,6 +74,11 @@ class Dispatcher:
         # Initialized lazily on first use so it binds to the running event loop.
         self._cond: asyncio.Condition | None = None
         self._status_task: asyncio.Task | None = None
+        # Manager is used to create result queues that can be passed to worker
+        # processes at runtime via the request queue.  Spawn-context Queues
+        # cannot be pickled after process creation (Python 3.11 strictly enforces
+        # this), but Manager proxy queues can be shared across processes freely.
+        self._manager: multiprocessing.managers.SyncManager | None = None
 
     def _get_cond(self) -> asyncio.Condition:
         """Return the Condition, creating it lazily inside a running loop."""
@@ -86,6 +92,8 @@ class Dispatcher:
 
     def start(self) -> None:
         """Spawn all worker processes. Call before the event loop starts."""
+        # Start the Manager server process first so make_queue() is available.
+        self._manager = multiprocessing.Manager()
         total = sum(self._workers_per_gpu)
         logger.info(
             "Dispatcher — spawning %d worker(s) across %d GPU slot(s)",
@@ -157,16 +165,28 @@ class Dispatcher:
                 logger.warning("Worker %s did not exit — terminating", w.worker_id)
                 w.process.terminate()
 
+        if self._manager:
+            self._manager.shutdown()
+
         logger.info("Dispatcher — shutdown complete")
 
     # ------------------------------------------------------------------
     # Queue factory (M-10)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def make_queue() -> multiprocessing.Queue:
-        """Create a result queue using the same spawn context as worker processes."""
-        return _MP_CTX.Queue()
+    def make_queue(self) -> multiprocessing.Queue:
+        """
+        Create a result queue that can be sent to a worker at runtime.
+
+        Spawn-context Queue objects cannot be pickled after process creation —
+        Python 3.11 enforces this strictly (assert_spawning raises if you try
+        to put a Queue into another Queue's message).  Manager proxy queues are
+        exempt from this restriction because they are proxied through a separate
+        server process, so they serialize as a thin connection object.
+        """
+        if self._manager is None:
+            raise RuntimeError("Call start() before make_queue()")
+        return self._manager.Queue()  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
     # Dispatch
