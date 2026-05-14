@@ -33,7 +33,7 @@ class SpeakerRecord:
     name: str
     wav_path: str
     gpt_cond_latent: np.ndarray  # float32, shape (1, T, 1024)
-    speaker_embedding: np.ndarray  # float32, shape (1, 512)
+    speaker_embedding: np.ndarray  # float32, shape (1, 512, 1) — matches conv1d input (N, C, L)
     created_at: str = ""
 
 

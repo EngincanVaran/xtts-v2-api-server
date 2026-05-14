@@ -83,14 +83,17 @@ def _to_numpy_latent(tensor) -> "np.ndarray":
 
 
 def _to_numpy_embedding(tensor) -> "np.ndarray":
-    """Convert speaker_embedding tensor to float32 numpy, ensuring shape (1, 512)."""
+    """Convert speaker_embedding tensor to float32 numpy, ensuring shape (1, 512, 1).
+
+    The model's speaker encoder uses conv1d with weight (512, 512, 1), so the
+    embedding must be (N=1, C_in=512, L=1).  The pth file already stores this
+    shape; we just normalise flatter variants in case of format differences.
+    """
     import numpy as np
 
     arr = tensor.numpy().astype(np.float32) if hasattr(tensor, "numpy") else tensor.astype(np.float32)
-    arr = arr.squeeze()      # (1, 512, 1) or (512,) or (1, 512) → (512,)
-    if arr.ndim == 1:        # (512,) → (1, 512)
-        arr = arr[None]
-    return arr
+    arr = arr.reshape(-1)    # flatten to (512,) regardless of input shape
+    return arr[None, :, None]  # → (1, 512, 1)
 
 
 # ---------------------------------------------------------------------------
