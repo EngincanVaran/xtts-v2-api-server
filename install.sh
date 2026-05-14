@@ -191,18 +191,31 @@ PIP="$VENV_DIR/bin/pip"
 _ok "pip upgraded inside venv: $("$PIP" --version | awk '{print $2}')"
 
 # ===========================================================================
-# 7. Install dependencies
+# 7. Install pip-tools and regenerate requirements.txt
+# ===========================================================================
+_sep; _info "Installing pip-tools and compiling requirements …"
+
+"$PIP" install pip-tools --quiet
+_ok "pip-tools: $("$VENV_DIR/bin/pip-compile" --version 2>/dev/null | head -1)"
+
+REQUIREMENTS_IN="$SCRIPT_DIR/requirements.in"
+REQUIREMENTS="$SCRIPT_DIR/requirements.txt"
+
+if [[ ! -f "$REQUIREMENTS_IN" ]]; then
+    _err "requirements.in not found at $REQUIREMENTS_IN"
+    exit 1
+fi
+
+_info "Running pip-compile to generate requirements.txt …"
+"$VENV_DIR/bin/pip-compile" "$REQUIREMENTS_IN" -o "$REQUIREMENTS" --quiet
+_ok "requirements.txt generated."
+
+# ===========================================================================
+# 8. Install dependencies
 # ===========================================================================
 _sep; _info "Installing dependencies …"
 _info "This may take several minutes (PyTorch, coqui-tts, etc.)."
 echo ""
-
-REQUIREMENTS="$SCRIPT_DIR/requirements.txt"
-if [[ ! -f "$REQUIREMENTS" ]]; then
-    _err "requirements.txt not found at $REQUIREMENTS"
-    _err "Generate it with: pip-compile requirements.in -o requirements.txt"
-    exit 1
-fi
 
 # Step 1 — coqui-tts without its deps.
 # encodec (a coqui-tts dep) carries a license that may be restricted in
