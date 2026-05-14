@@ -14,10 +14,10 @@ A **vllm-style FastAPI inference server** for [Coqui XTTS-v2](https://github.com
 
 ```
 xtts-v2-api-server/
-├── install.sh            # Linux-only setup script (CUDA/Python/torch checks, .venv, pip install)
+├── install.sh            # Linux-only setup: pip-tools + pip-compile + two-step coqui-tts install
 ├── start-server.sh       # GPU-aware launch script (pre-flight checks, CUDA_VISIBLE_DEVICES, GPU_MEMORY_FRACTION)
-├── requirements.in       # hand-edited direct deps
-├── requirements.txt      # generated lockfile (pip-compile)
+├── requirements.in       # hand-edited direct deps — the only file that needs to exist before install
+├── requirements.txt      # generated lockfile (produced by install.sh via pip-compile; do not edit by hand)
 ├── pyproject.toml        # ruff config
 ├── Dockerfile
 ├── .env.example
@@ -360,7 +360,16 @@ Ignored: `E501` (line length, handled by formatter), `B008` (FastAPI Depends pat
 ## Linux Setup Scripts
 
 ### `install.sh`
-Linux-only. Checks: OS, `nvidia-smi` presence, CUDA ≥ 12.1, Python 3.11+, `pip`. Creates `.venv/`, runs `pip install -r requirements.txt`, then verifies `torch.__version__`, `torchaudio.__version__`, `torch.cuda.is_available()`, and `torch.cuda.device_count()`. Copies `.env.example → xtts_server/.env` if absent. Creates `xtts_server/speakers/` and `xtts_server/outputs/`.
+Linux-only. Full install sequence (order is load-bearing):
+
+1. OS / `nvidia-smi` / CUDA ≥ 12.1 / Python 3.11+ / `pip` checks
+2. Creates `.venv/`, upgrades pip
+3. Installs `pip-tools` into the venv
+4. Runs `pip-compile requirements.in -o requirements.txt` — generates the lockfile fresh from `requirements.in`. Only `requirements.in` needs to exist on the machine; `requirements.txt` is produced here.
+5. `pip install coqui-tts==0.27.1 --no-deps` — encodec (license-restricted) intentionally excluded
+6. `pip install -r requirements.txt` — all remaining deps including coqui-tts's transitive ones
+7. Verifies `torch.__version__`, `torchaudio.__version__`, `torch.cuda.is_available()`, `torch.cuda.device_count()`
+8. Copies `.env.example → xtts_server/.env` if absent. Creates `xtts_server/speakers/` and `xtts_server/outputs/`.
 
 ### `start-server.sh`
 Linux-only. CONFIGURATION block at the top — edit before running. Key vars:
