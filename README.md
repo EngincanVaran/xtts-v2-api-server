@@ -1,4 +1,4 @@
-# XTTS-v2 Inference Server
+# QUAKER-XTTS Inference Server
 
 A production-grade, multi-GPU text-to-speech API server built on [Coqui XTTS-v2](https://github.com/coqui-ai/TTS) and FastAPI.
 
@@ -14,7 +14,11 @@ A production-grade, multi-GPU text-to-speech API server built on [Coqui XTTS-v2]
 - **Request queue** — clients wait instead of receiving 503 (only returned when the queue itself is full)
 - **Live worker observability** — periodic log shows each in-flight job, elapsed time, queue depth, and total throughput per worker; also exposed via `GET /v1/system/info`
 - **One-shot audio download** — `GET /v1/tts/{id}/audio` deletes the file immediately after serving; second download returns `410 Gone`
-- **Verbose structured logging** — every request lifecycle event, GPU VRAM, worker stats, RTF
+- **Verbose structured logging** — every request lifecycle event, GPU VRAM, worker stats, RTF, first-chunk latency
+- **HTTP access log middleware** — one line per request with method, path, status, duration, client IP, and an `X-Request-ID` correlation header
+- **GPU memory cap** — set `GPU_MEMORY_FRACTION` (e.g. `0.8`) to limit per-worker VRAM via `torch.cuda.set_per_process_memory_fraction`
+- **GPU selection** — `CUDA_VISIBLE_DEVICES` controls which physical GPUs are exposed to the server
+- **QUAKER-XTTS startup banner** — Spring Boot / vLLM-style ASCII art banner on every startup
 
 ---
 
@@ -65,6 +69,15 @@ For WebSocket streaming, `model.inference_stream()` is used instead — it yield
 
 ### 2. Install dependencies
 
+**Linux (GPU) — recommended path:**
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+`install.sh` checks OS, CUDA (≥ 12.1), Python (≥ 3.11), creates a `.venv/`, runs `pip install -r requirements.txt`, and verifies `torch.cuda.is_available()` at the end.
+
 > **macOS note:** `llvmlite` (a transitive dep via numba → librosa → TTS) does not build from source on macOS without LLVM. Use conda instead of a plain venv:
 > ```bash
 > brew install miniconda
@@ -73,13 +86,6 @@ For WebSocket streaming, `model.inference_stream()` is used instead — it yield
 > conda install -c conda-forge llvmlite numba librosa
 > pip install -r requirements.txt
 > ```
-
-On Linux / Docker, a plain pip install works:
-
-```bash
-pip install pip-tools
-pip install -r requirements.txt
-```
 
 To regenerate the lockfile after editing `requirements.in`:
 
@@ -123,9 +129,21 @@ curl -X POST http://localhost:8000/v1/tts/sync \
 
 ### 4. Run the server
 
+**Linux (GPU) — recommended path:**
+
+```bash
+# Edit the CONFIGURATION block at the top of start-server.sh, then:
+chmod +x start-server.sh
+./start-server.sh
+```
+
+`start-server.sh` validates the environment (GPU inventory, CUDA version, torch install), optionally seeds studio speakers, then launches the server.
+
+**Manual / macOS dev:**
+
 ```bash
 export MODEL_PATH=/path/to/your/xtts-v2
-python main.py
+cd xtts_server && python main.py
 ```
 
 The server starts at `http://localhost:8000`.  
@@ -152,6 +170,8 @@ All settings are read from environment variables (or a `.env` file in the workin
 | `LOG_LEVEL` | `INFO` | Python logging level: DEBUG, INFO, WARNING, ERROR |
 | `HOST` | `0.0.0.0` | Bind address |
 | `PORT` | `8000` | Bind port |
+| `CUDA_VISIBLE_DEVICES` | all GPUs | Comma-separated GPU indices to expose (e.g. `"0,1"`) |
+| `GPU_MEMORY_FRACTION` | `1.0` | Per-worker VRAM cap as a fraction of total (e.g. `0.8` = 80%) |
 
 ### Multi-GPU example
 
@@ -159,6 +179,8 @@ All settings are read from environment variables (or a `.env` file in the workin
 # 3 GPUs: 2 workers on GPU 0, 3 on GPU 1, 2 on GPU 2 (7 concurrent synthesis processes)
 export MODEL_PATH=/models/xtts-v2
 export WORKERS_PER_GPU=2,3,2
+export CUDA_VISIBLE_DEVICES=0,1,2
+export GPU_MEMORY_FRACTION=0.8
 python main.py
 ```
 
@@ -343,6 +365,8 @@ docker run --gpus all \
 
 ```
 xtts-v2-api-server/
+├── install.sh               # Linux-only setup: checks CUDA/Python/torch, creates .venv, installs deps
+├── start-server.sh          # GPU-aware launch: validates env, optional speaker seed, then exec python main.py
 ├── requirements.in          # Direct dependencies (pip-tools source)
 ├── requirements.txt         # Pinned lockfile (generated — do not edit by hand)
 ├── pyproject.toml           # ruff config
@@ -385,10 +409,14 @@ The server defaults to Turkish (`tr`). Requests in other languages are accepted 
 Logs are written to both stdout and `xtts_server/logs/xtts_server.log` (rotating, 10 MB × 3 backups).
 
 Key log events:
-- Startup: config dump, MODEL_PATH file check with sizes, GPU inventory, worker spawn
-- Per request: text preview, language, speaker, queue position, worker assigned, synthesis duration, realtime factor (RTF)
-- Periodic (every 60 s): per-worker stats, GPU VRAM usage, queue depth, job store counts
-- Errors: synthesis failures with full tracebacks, missing files, queue overflow
+- **Startup:** QUAKER-XTTS ASCII art banner, config dump, MODEL_PATH file check with sizes, GPU inventory, worker spawn
+- **Access log:** one line per HTTP request — `METHOD /path → STATUS | elapsed_ms | client=IP | req=ID`. `/health` is logged at DEBUG to reduce noise from probes. The `X-Request-ID` header is echoed back to the client (or generated if absent) for client-side correlation.
+- **Per request:** text preview, language, speaker, synthesis duration, audio duration, realtime factor (RTF)
+- **WebSocket stream:** dispatched worker, first-chunk latency, per-stream RTF, total bytes
+- **Job lifecycle:** total time from queue entry to `on_complete` completion (queue wait + synthesis + audio save)
+- **Voice clone:** latent computation time, gpt/embedding shapes
+- **Periodic (every 60 s):** per-worker active jobs with elapsed time, GPU VRAM, queue depth, job store counts
+- **Errors:** synthesis failures with full tracebacks, missing files, queue overflow
 
 ---
 

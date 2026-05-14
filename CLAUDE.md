@@ -14,6 +14,8 @@ A **vllm-style FastAPI inference server** for [Coqui XTTS-v2](https://github.com
 
 ```
 xtts-v2-api-server/
+├── install.sh            # Linux-only setup script (CUDA/Python/torch checks, .venv, pip install)
+├── start-server.sh       # GPU-aware launch script (pre-flight checks, CUDA_VISIBLE_DEVICES, GPU_MEMORY_FRACTION)
 ├── requirements.in       # hand-edited direct deps
 ├── requirements.txt      # generated lockfile (pip-compile)
 ├── pyproject.toml        # ruff config
@@ -128,9 +130,10 @@ CUDA does not survive `fork()`. All worker `Process` objects are created via `_M
 Job state is a plain `dict[str, Job]` guarded by `asyncio.Lock`. TTL cleanup runs every 60 s in a background task. This is sufficient for single-process deployments. If you ever need multi-process uvicorn workers or cross-node sharing, add Redis then.
 
 ### 6. Blocking I/O always in `run_in_executor`
-The event loop must never block. Four places where this matters:
+The event loop must never block. Five places where this matters:
 - `result_queue.get()` — in `queue_manager._collect_result` and `ws/stream.py`
 - `save_audio()` (soundfile write) — in the `on_complete` callback in `tts.py` and `batch.py`
+- `audio_to_bytes()` (soundfile encode) — in `synthesise_sync` in `tts.py` (sync endpoint must not block either)
 - `process.join()` — in `dispatcher.shutdown`
 - `worker.request_queue.put(request)` — in `dispatcher.dispatch()`
 
@@ -159,6 +162,17 @@ This guarantees the slot is freed even if the client disconnects mid-stream or a
 `WorkerHandle.active_jobs: dict[str, float]` maps job_id → monotonic start time. Populated in `dispatch()`, evicted in `release(job_id=...)`. All three `release()` callers (queue_manager, ws/stream, compute_latents) pass `job_id`. This drives the periodic status log (shows each job and its elapsed time per worker) and the `/v1/system/info` response (`worker_stats()` includes `active_jobs`).
 
 `release()` also increments `WorkerHandle.total_requests` (fixing the long-standing bug where it always showed 0).
+
+### 13. GPU memory fraction (`GPU_MEMORY_FRACTION`)
+Workers read `os.environ.get("GPU_MEMORY_FRACTION", "1.0")` and call `torch.cuda.set_per_process_memory_fraction(fraction, gpu_index)` **before** the model is loaded. This caps how much VRAM each worker process can allocate. `start-server.sh` validates and exports this value; `worker.py` applies it in `_apply_memory_fraction()` called at device setup time.
+
+A value of `1.0` (default) disables the cap. Only values in `(0.0, 1.0)` apply the limit — `1.0` is passed through silently (PyTorch treats it as no-op).
+
+### 14. Startup banner
+`_log_banner(settings)` in `main.py` renders a QUAKER-XTTS ASCII art banner immediately after `load_settings()`. It is intentionally printed as a single `logger.info()` call so the entire block appears atomically in logs. The banner includes model path, worker count, language, queue size, and endpoint URLs.
+
+### 15. HTTP access log middleware
+Registered in `create_app()` via `@app.middleware("http")`. Logs one line per request at INFO (DEBUG for `/health`). Generates or forwards `X-Request-ID` (8-char hex) and echoes it as a response header — clients can pass `X-Request-ID` to correlate logs with their own traces. WebSocket upgrades appear as `101`.
 
 ### 12. Audio file deleted after first download
 `GET /v1/tts/{job_id}/audio` uses a `starlette.background.BackgroundTask` to delete the audio file from disk and clear `job.audio_path` immediately after the response is sent. Subsequent downloads return `410 Gone`. The polling response (`GET /v1/jobs/{id}`) hides `audio_url` once `audio_path` is cleared. The TTL cleanup loop is unaffected (it skips files that are already gone).
@@ -264,6 +278,8 @@ Key settings in `xtts_server/config.py` → `Settings(BaseSettings)`:
 | `MAX_TEXT_LENGTH` | `int` | `5000` | Hard cap on input text length |
 | `SAMPLE_RATE` | `int` | `24000` | XTTS-v2 native sample rate — do not change |
 | `LOG_LEVEL` | `str` | `"INFO"` | Passed to logging |
+| `CUDA_VISIBLE_DEVICES` | `str` | all GPUs | GPU indices to expose (e.g. `"0,1"`); standard PyTorch env var |
+| `GPU_MEMORY_FRACTION` | `float` | `"1.0"` | Per-worker VRAM cap `(0.0, 1.0]`; exported by `start-server.sh`, read by `worker.py` |
 
 Required model files in `MODEL_PATH`: `config.json`, `model.pth`, `vocab.json`.
 
@@ -274,7 +290,7 @@ Supported languages (17): `en es fr de it pt pl tr ru nl cs ar zh-cn ja hu ko hi
 ## Startup / Shutdown Order
 
 **Startup** (in `main.py` lifespan, order is load-bearing):
-1. `load_settings()` — validates config and model files
+1. `load_settings()` — validates config and model files; `_log_banner()` immediately after prints the QUAKER-XTTS ASCII art
 2. `Dispatcher.start()` — starts Manager process, then spawns worker processes synchronously (before the event loop enters async code — `multiprocessing.Process.start()` is not async-safe)
 3. `JobStore`, `SpeakerStore`, `QueueManager` — plain construction
 4. `job_store.start()`, `queue_manager.start()`, `dispatcher.start_background_tasks()` — start async background tasks
@@ -338,6 +354,28 @@ Ignored: `E501` (line length, handled by formatter), `B008` (FastAPI Depends pat
 - **Long texts:** XTTS-v2 degrades on very long inputs. Consider splitting at sentence boundaries before `model.inference()` and concatenating audio chunks.
 - **CPU fallback:** config supports 0 GPUs (single CPU worker), but latency will be high (~10-30× real time). Only suitable for dev/testing.
 - **Dockerfile requirements path:** the Dockerfile copies `xtts_server/requirements.in` — now that deps live at project root, update the `COPY` instruction when rebuilding.
+
+---
+
+## Linux Setup Scripts
+
+### `install.sh`
+Linux-only. Checks: OS, `nvidia-smi` presence, CUDA ≥ 12.1, Python 3.11+, `pip`. Creates `.venv/`, runs `pip install -r requirements.txt`, then verifies `torch.__version__`, `torchaudio.__version__`, `torch.cuda.is_available()`, and `torch.cuda.device_count()`. Copies `.env.example → xtts_server/.env` if absent. Creates `xtts_server/speakers/` and `xtts_server/outputs/`.
+
+### `start-server.sh`
+Linux-only. CONFIGURATION block at the top — edit before running. Key vars:
+
+| Variable | Description |
+|---|---|
+| `MODEL_PATH` | Path to XTTS-v2 model directory |
+| `CUDA_VISIBLE_DEVICES` | GPU indices to expose (`"0"`, `"0,1"`, etc.) |
+| `GPU_MEMORY_FRACTION` | Per-worker VRAM cap as float in `(0, 1]` |
+| `WORKERS_PER_GPU` | Workers per visible GPU or comma-separated list |
+| `SEED_SPEAKERS` | `true/false` — run `seed_studio_speakers.py` before launch |
+
+Pre-flight checks: OS, MODEL_PATH (catches placeholder), `nvidia-smi`, CUDA version, GPU inventory with utilisation + temperature, `CUDA_VISIBLE_DEVICES` index validation, `GPU_MEMORY_FRACTION` range, `.venv` presence, torch/torchaudio/CUDA install, VRAM summary. Ends with `exec "$PYTHON" main.py` from `xtts_server/`.
+
+`GPU_MEMORY_FRACTION` is exported so worker processes inherit it (they read it via `os.environ.get("GPU_MEMORY_FRACTION", "1.0")`).
 
 ---
 
