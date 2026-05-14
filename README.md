@@ -12,6 +12,8 @@ A production-grade, multi-GPU text-to-speech API server built on [Coqui XTTS-v2]
 - **Voice cloning** — upload a reference audio clip, register a speaker name, reuse it forever
 - **Batch synthesis** — submit up to 50 TTS items in a single request
 - **Request queue** — clients wait instead of receiving 503 (only returned when the queue itself is full)
+- **Live worker observability** — periodic log shows each in-flight job, elapsed time, queue depth, and total throughput per worker; also exposed via `GET /v1/system/info`
+- **One-shot audio download** — `GET /v1/tts/{id}/audio` deletes the file immediately after serving; second download returns `410 Gone`
 - **Verbose structured logging** — every request lifecycle event, GPU VRAM, worker stats, RTF
 
 ---
@@ -276,6 +278,43 @@ asyncio.run(stream())
 ```bash
 curl http://localhost:8000/v1/system/info
 ```
+
+The `workers` array in the response now includes `active_jobs` — a list of `{job_id, elapsed_s}` objects for every synthesis currently in progress on that worker:
+
+```json
+{
+  "workers": [
+    {
+      "worker_id": "gpu0-w0",
+      "active_requests": 1,
+      "total_requests": 47,
+      "avg_synthesis_ms": 1842.0,
+      "active_jobs": [
+        { "job_id": "550e8400-...", "elapsed_s": 1.4 }
+      ]
+    }
+  ]
+}
+```
+
+The same information is logged every 60 seconds:
+
+```
+--- Worker status | queue=0 waiting ---
+  worker=gpu0-w0  gpu=0  alive=True  active=1  total=47  avg_ms=1842.0
+    job=550e8400  elapsed=1.4s
+  worker=gpu0-w1  gpu=0  alive=True  active=0  total=31  avg_ms=1650.0
+    (idle)
+--- End worker status ---
+```
+
+### Download audio (one-shot)
+
+```bash
+curl http://localhost:8000/v1/tts/550e8400-.../audio -o output.wav
+```
+
+The audio file is deleted from disk immediately after the response is sent. A second request for the same job returns `410 Gone`. The job record itself stays in memory until the TTL expires.
 
 ---
 
