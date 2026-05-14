@@ -254,9 +254,7 @@ regex==2026.5.9
     #   dateparser
     #   transformers
 requests==2.34.1
-    # via
-    #   pooch
-    #   transformers
+    # via pooch
 rich==15.0.0
     # via typer
 safetensors==0.7.0
