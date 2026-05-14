@@ -50,7 +50,7 @@ sys.exit(0 if a >= b else 1)
 "
 }
 
-_bold "=== XTTS-v2 API Server — Install ==="
+_bold "=== QUAKER-XTTS API Server — Install ==="
 echo "Project root : $SCRIPT_DIR"
 echo ""
 
@@ -193,18 +193,29 @@ _ok "pip upgraded inside venv: $("$PIP" --version | awk '{print $2}')"
 # ===========================================================================
 # 7. Install dependencies
 # ===========================================================================
-_sep; _info "Installing dependencies from requirements.txt …"
-_info "This may take several minutes (PyTorch, TTS, etc.)."
+_sep; _info "Installing dependencies …"
+_info "This may take several minutes (PyTorch, coqui-tts, etc.)."
 echo ""
 
 REQUIREMENTS="$SCRIPT_DIR/requirements.txt"
 if [[ ! -f "$REQUIREMENTS" ]]; then
     _err "requirements.txt not found at $REQUIREMENTS"
+    _err "Generate it with: pip-compile requirements.in -o requirements.txt"
     exit 1
 fi
 
+# Step 1 — coqui-tts without its deps.
+# encodec (a coqui-tts dep) carries a license that may be restricted in
+# corporate environments.  We install coqui-tts alone first, then install
+# all its other deps via requirements.txt.
+_info "Step 1/2 — installing coqui-tts==0.27.1 (--no-deps, encodec excluded) …"
+"$PIP" install "coqui-tts==0.27.1" --no-deps --quiet
+_ok "coqui-tts installed (no-deps)."
+
+# Step 2 — everything else (including coqui-tts's other transitive deps).
+_info "Step 2/2 — installing remaining dependencies from requirements.txt …"
 "$PIP" install -r "$REQUIREMENTS"
-_ok "Dependencies installed."
+_ok "All dependencies installed."
 
 # ===========================================================================
 # 8. Post-install verification — PyTorch + CUDA
@@ -286,7 +297,7 @@ _ok "Runtime directories ready (speakers/, outputs/)"
 # Done
 # ===========================================================================
 _sep
-_bold "=== Install complete ==="
+_bold "=== QUAKER-XTTS Install complete ==="
 echo ""
 echo "  Python venv : $VENV_DIR"
 echo "  GPUs found  : $TOTAL_GPUS"

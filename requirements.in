@@ -13,37 +13,66 @@
 #   2. Run: pip-compile requirements.in -o requirements.txt
 #   3. Commit both files together
 #
-# To upgrade all pins:
-#   pip-compile --upgrade requirements.in -o requirements.txt
+# -----------------------------------------------------------------------
+# IMPORTANT — coqui-tts install order
+# -----------------------------------------------------------------------
+# coqui-tts declares `encodec>=0.1.1` as a dependency.  encodec carries a
+# non-OSI license that is restricted in certain corporate environments.
+# To work around this, coqui-tts is installed with --no-deps and all its
+# remaining deps are listed explicitly below.
+#
+# Install sequence (handled by install.sh):
+#   1. pip install coqui-tts==0.27.1 --no-deps
+#   2. pip install -r requirements.txt          (everything else)
+#
+# pip-compile can still resolve and pin all deps in step 2 correctly
+# because coqui-tts itself is excluded from this file.
 # -----------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
 # Web framework
+# ---------------------------------------------------------------------------
 fastapi
 uvicorn[standard]
 python-multipart
 
-# TTS model — original Coqui TTS package; 0.22.0 is the last release before
-# the project forked to coqui-tts and adopted transformers 5.x (requires torch>=2.4)
-TTS==0.22.0
-
-# Deep learning — torch 2.4+ dropped Intel Mac (osx-64) support; 2.2.2 is the max
-torch==2.2.2
-torchaudio==2.2.2
-# transformers 4.45+ requires torch>=2.4; cap to stay on torch 2.2.2
-transformers>=4.37,<4.45
-
+# ---------------------------------------------------------------------------
 # Audio I/O and conversion
-soundfile
+# ---------------------------------------------------------------------------
+soundfile>=0.12.0
 pydub
 
+# ---------------------------------------------------------------------------
 # Settings management
+# ---------------------------------------------------------------------------
 pydantic-settings
 
-# Numerical
-numpy
+# ---------------------------------------------------------------------------
+# coqui-tts==0.27.1 dependencies  (encodec intentionally omitted)
+# ---------------------------------------------------------------------------
 
-# llvmlite 0.47 has no pre-built wheel for Intel Mac Python 3.11 and requires
-# building from source against a specific LLVM version. Pin to the latest
-# version that ships a pre-built wheel for this platform.
-llvmlite==0.45.1       # last stable release with a pre-built wheel for Intel Mac Python 3.11
-numba>=0.60,<0.63      # 0.62.x supports llvmlite 0.45.x
+# Deep learning
+torch>=2.1,<2.9
+torchaudio>=2.1,<2.9
+transformers>=4.52.1
+
+# coqui-tts core deps
+anyascii>=0.3.0
+coqpit-config>=0.2.0,<0.3.0
+coqui-tts-trainer>=0.3.0,<0.4.0
+cython>=3.0.0
+einops>=0.6.0
+fsspec[http]>=2023.6.0
+gruut[de,es,fr]>=2.4.0
+inflect>=5.6.0
+librosa>=0.11.0
+matplotlib>=3.8.4
+monotonic-alignment-search>=0.1.0
+num2words>=0.5.14
+numpy>=1.26.0
+packaging>=23.1
+pysbd>=0.3.4
+pyyaml>=6.0
+scipy>=1.13.0
+tqdm>=4.64.1
+typing-extensions>=4.10
