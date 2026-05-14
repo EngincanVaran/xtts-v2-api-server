@@ -109,7 +109,7 @@ class Dispatcher:
                     device_name = torch.cuda.get_device_name(gpu_index)
 
             for slot in range(count):
-                worker_id = f"gpu{gpu_index}-w{slot}"
+                worker_id = f"cpu-w{slot}" if not cuda_ok else f"gpu{gpu_index}-w{slot}"
                 q = _MP_CTX.Queue()
                 p = _MP_CTX.Process(
                     target=worker_main,
