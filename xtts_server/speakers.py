@@ -193,8 +193,11 @@ class SpeakerStore:
         wav_path = os.path.join(speaker_dir, "ref.wav")
         meta_path = os.path.join(speaker_dir, "meta.json")
 
-        if not os.path.isfile(latents_path) or not os.path.isfile(wav_path):
+        if not os.path.isfile(latents_path):
             return None
+        # ref.wav is absent for studio speakers (latents pre-computed from model checkpoint)
+        if not os.path.isfile(wav_path):
+            wav_path = ""
 
         data = np.load(latents_path)
         created_at = ""

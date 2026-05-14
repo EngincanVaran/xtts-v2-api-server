@@ -4,6 +4,12 @@ This file is a checkpoint for Claude Code (and human developers). It captures ar
 
 ---
 
+## Project Goal
+
+A **vllm-style FastAPI inference server** for [Coqui XTTS-v2](https://github.com/coqui-ai/TTS) — multi-GPU, multi-worker, async-first, production-grade. The design borrows vllm's ideas: a central request queue, least-loaded worker routing, async fire-and-poll jobs, and WebSocket streaming for low-latency output. The model itself (XTTS-v2) is a GPT-based TTS model that conditions on speaker latents.
+
+---
+
 ## Project Layout
 
 ```
@@ -41,6 +47,26 @@ cd xtts_server && python main.py
 
 ---
 
+## API Surface
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Liveness probe — returns `{"status":"ok","uptime_s":…}` |
+| `GET` | `/v1/system/info` | GPU/worker stats, queue depth, job counts |
+| `POST` | `/v1/tts` | Submit async TTS job → `202 {job_id, poll_url}` |
+| `POST` | `/v1/tts/sync` | Synthesise and return audio file immediately (client blocks) |
+| `GET` | `/v1/tts/{job_id}/audio` | Download finished audio (`409` if not done yet) |
+| `GET` | `/v1/jobs` | List all jobs (debug) |
+| `GET` | `/v1/jobs/{job_id}` | Poll job status + timing metadata |
+| `POST` | `/v1/batch` | Submit up to 50 TTS items in one request |
+| `POST` | `/v1/clone` | Upload reference audio → register speaker name |
+| `GET` | `/v1/speakers` | List all registered speakers |
+| `GET` | `/v1/speakers/{name}` | Metadata for one speaker |
+| `DELETE` | `/v1/speakers/{name}` | Delete speaker (evicts cache + removes disk files) |
+| `WS` | `/v1/stream` | WebSocket streaming — raw float32 PCM chunks |
+
+---
+
 ## Core Data Flow
 
 ```
@@ -48,7 +74,7 @@ POST /v1/tts
   → TtsRequest validated (Pydantic)
   → _resolve_speaker() → (gpt_cond_latent: np.ndarray, speaker_embedding: np.ndarray, speaker_id: str)
   → job_store.create() → Job (PENDING)
-  → dispatcher.make_queue() → multiprocessing.Queue (spawn context)
+  → dispatcher.make_queue() → Manager proxy Queue  ← NOT a bare mp.Queue
   → SynthesisRequest(job_id, text, lang, latents, result_queue)
   → queue_manager.submit_job(request, on_complete)
       → asyncio.Queue.put_nowait (raises QueueFullError if full)
@@ -61,9 +87,9 @@ POST /v1/tts
   → asyncio.create_task(_collect_result)
 
 [worker process]
-  → receives SynthesisRequest from mp.Queue
+  → receives SynthesisRequest from its request_queue (spawn-ctx mp.Queue)
   → model.inference(text, lang, gpt_latent_tensor, spk_emb_tensor)
-  → puts SynthesisResult(job_id, audio_np, sample_rate) on result_queue
+  → puts SynthesisResult(job_id, audio_np, sample_rate) on result_queue (Manager proxy)
 
 [_collect_result task]
   → run_in_executor(result_queue.get)   # blocking get, off event loop
@@ -83,28 +109,38 @@ This server calls `model.inference(text, lang, gpt_cond_latent, speaker_embeddin
 
 For streaming: `model.inference_stream()` — yields chunks so the first audio arrives ~200-400 ms into synthesis.
 
-### 2. `multiprocessing.get_context("spawn")`
-CUDA does not survive `fork()`. All worker processes and their `multiprocessing.Queue` instances **must** be created with the `spawn` context. The module-level `_MP_CTX = multiprocessing.get_context("spawn")` in `dispatcher.py` is the single source of truth. Always use `dispatcher.make_queue()` — never `multiprocessing.Queue()` directly.
+### 2. Two-tier queue system: spawn-ctx vs Manager proxy
+There are **two distinct queue types** in the codebase, and they serve different purposes:
 
-### 3. Lazy `asyncio.Condition` in Dispatcher
+- **Worker request queue** (`_MP_CTX.Queue()`, created at spawn time, passed as a constructor arg to the worker `Process`): used to send `SynthesisRequest` / `StreamSynthesisRequest` / `ComputeLatentsRequest` to the worker. This is fine because it's established before the process starts.
+
+- **Per-job result queue** (`self._manager.Queue()`, Manager proxy, created at request time via `dispatcher.make_queue()`): used to receive `SynthesisResult` / `SynthesisChunk` etc. back from the worker. This **must** be a Manager proxy queue — Python 3.11 strictly enforces that spawn-context `Queue` objects cannot be pickled after process creation (trying to put a Queue into another Queue's message raises `assert_spawning`). Manager proxy queues are serialized as thin connection objects and are exempt from this restriction.
+
+**Rule:** always use `dispatcher.make_queue()` for result queues. Never use `multiprocessing.Queue()` or `_MP_CTX.Queue()` directly for result queues.
+
+### 3. `multiprocessing.get_context("spawn")`
+CUDA does not survive `fork()`. All worker `Process` objects are created via `_MP_CTX = multiprocessing.get_context("spawn")` in `dispatcher.py`. The Manager itself is also started before workers via `multiprocessing.Manager()` (which uses its own server process).
+
+### 4. Lazy `asyncio.Condition` in Dispatcher
 `asyncio.Condition` (and `asyncio.Lock`) must be created **inside a running event loop** — creating them in `__init__` before the loop exists causes "attached to a different loop" errors. `dispatcher.py` stores `self._cond: asyncio.Condition | None = None` and creates it lazily on first use via `_get_cond()`.
 
-### 4. No Redis
+### 5. No Redis
 Job state is a plain `dict[str, Job]` guarded by `asyncio.Lock`. TTL cleanup runs every 60 s in a background task. This is sufficient for single-process deployments. If you ever need multi-process uvicorn workers or cross-node sharing, add Redis then.
 
-### 5. Blocking I/O always in `run_in_executor`
-The event loop must never block. Three places where this matters:
+### 6. Blocking I/O always in `run_in_executor`
+The event loop must never block. Four places where this matters:
 - `result_queue.get()` — in `queue_manager._collect_result` and `ws/stream.py`
 - `save_audio()` (soundfile write) — in the `on_complete` callback in `tts.py` and `batch.py`
 - `process.join()` — in `dispatcher.shutdown`
+- `worker.request_queue.put(request)` — in `dispatcher.dispatch()`
 
-### 6. Workers are released before `on_complete` is awaited
+### 7. Workers are released before `on_complete` is awaited
 In `_collect_result`: `dispatcher.release()` is called **before** `on_complete()`. This is intentional — the worker slot is freed as soon as synthesis is done so the drain loop can dispatch the next request. Audio encoding (`save_audio`) happens after release and does not hold up the next job.
 
-### 7. `asyncio.Future[WorkerHandle]` for WebSocket streams
+### 8. `asyncio.Future[WorkerHandle]` for WebSocket streams
 `submit_stream()` returns a `Future` that is resolved by the drain loop once the request is dispatched. The WebSocket handler `await`s this future to learn which `WorkerHandle` was assigned, so it can call `dispatcher.release(worker.worker_id)` in the `finally` block. Without this, the WS handler would not know which worker to release.
 
-### 8. Worker slot release on WebSocket disconnect
+### 9. Worker slot release on WebSocket disconnect
 `ws/stream.py` wraps the chunk-reading loop in `try/finally`:
 ```python
 try:
@@ -115,6 +151,24 @@ finally:
     await state.dispatcher.release(worker.worker_id, elapsed_ms=0.0)
 ```
 This guarantees the slot is freed even if the client disconnects mid-stream or an unexpected error occurs.
+
+### 10. Least-loaded dispatch
+`dispatcher._pick_worker()` returns `min(workers, key=lambda w: w.active_requests)`. The `active_requests` counter is incremented in `dispatch()` and decremented in `release()`, both under the `asyncio.Condition` lock.
+
+---
+
+## WebSocket Protocol (`/v1/stream`)
+
+1. Client connects, sends one JSON text frame:
+   ```json
+   {"text": "...", "language": "tr", "speaker_name": "alice"}
+   ```
+   (or `gpt_cond_latent` + `speaker_embedding` arrays instead of `speaker_name`)
+2. Server replies with **binary frames** — raw `float32` little-endian PCM, 24 000 Hz mono. Each frame is one chunk from `model.inference_stream()`.
+3. Server sends a final **text frame**: `{"status": "done"}` or `{"status": "error", "detail": "..."}`.
+4. Connection closes. Client reassembles chunks and knows the sample rate is 24 000 Hz.
+
+Close code `1013` (Try Again Later) is used when the queue is full.
 
 ---
 
@@ -130,6 +184,22 @@ meta.json      # {"name": "...", "created_at": "ISO-8601"}
 `SpeakerStore` keeps a `dict[str, SpeakerRecord]` RAM cache. `preload_all()` is called at startup. `get()` falls back to disk on cache miss. `delete()` evicts cache **before** `shutil.rmtree` (under `threading.Lock`) — this order is important; reversing it creates a window where the cache holds a record pointing to deleted files.
 
 Worker processes receive latents as **CPU numpy arrays** (picklable). Each worker converts them to device tensors inside `_handle_synthesis()`. Never pass GPU tensors across process boundaries.
+
+**Clone limits:**
+- Max upload size: 10 MB (`_MAX_AUDIO_BYTES` in `clone.py`)
+- Speaker name: alphanumeric + hyphens/underscores, max 64 chars, must be unique (409 on duplicate)
+- Temp files written to `SPEAKERS_DIR/.tmp/` during latent computation, deleted on success
+
+**Studio speakers (pre-seeded):**
+58 built-in XTTS-v2 voices from `speakers_xtts.pth` are registered at setup time by running:
+```bash
+python seed_studio_speakers.py --model-path ./model --speakers-dir ./xtts_server/speakers
+```
+The script reads `speakers_xtts.pth` directly (no full model load — runs in seconds).
+Display names are slugified: spaces → underscores, accents stripped ("Alma María" → "Alma_Maria").
+Studio speakers have no `ref.wav`; `_load_from_disk()` treats its absence as allowed and sets `wav_path=""`.
+Their `meta.json` includes `"source": "studio"` and `"original_name"` for traceability.
+Use `--force` to overwrite existing registrations, `--dry-run` to preview without writing.
 
 ---
 
@@ -148,6 +218,16 @@ TTL default: 300 s. Audio files are deleted from disk at eviction time.
 
 ---
 
+## Batch Endpoint
+
+`POST /v1/batch` accepts a list of TTS items (same schema as `TtsRequest`).
+- Max 50 items per request (`MAX_BATCH_SIZE` in `batch.py`)
+- All-or-nothing validation — if any item fails, the entire batch is rejected before any jobs are created
+- Each item enters the shared QueueManager and gets its own `job_id`; poll them individually
+- If the queue fills up mid-batch, already-created jobs are marked FAILED and a 503 is returned (no partial success)
+
+---
+
 ## Error Handling Patterns
 
 - **HTTP exceptions:** always `raise HTTPException(...) from exc` (ruff B904)
@@ -161,16 +241,23 @@ TTL default: 300 s. Audio files are deleted from disk at eviction time.
 
 Key settings in `xtts_server/config.py` → `Settings(BaseSettings)`:
 
-| Field | Type | Notes |
-|---|---|---|
-| `MODEL_PATH` | `str` | Required. Validated at startup — missing files → `sys.exit(1)` |
-| `WORKERS_PER_GPU` | `str` | `"1"` or `"2,3,2"`. Parsed into `workers_per_gpu_list: list[int]` |
-| `NUM_GPUS` | `int \| None` | Auto-detected via `torch.cuda.device_count()` if None |
-| `DEFAULT_LANGUAGE` | `str` | `"tr"`. Used as fallback when request omits language |
-| `MAX_QUEUE_SIZE` | `int` | asyncio.Queue maxsize. 503 only when this is full |
-| `JOB_TTL_SECONDS` | `int` | Eviction age for DONE/FAILED jobs |
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `MODEL_PATH` | `str` | — | Required. Startup aborts if dir or files missing |
+| `WORKERS_PER_GPU` | `str` | `"1"` | `"1"` or `"2,3,2"`. Parsed into `workers_per_gpu_list` |
+| `NUM_GPUS` | `int\|None` | `None` | Auto-detected via `torch.cuda.device_count()` if None |
+| `DEFAULT_LANGUAGE` | `str` | `"tr"` | Fallback when request omits language |
+| `MAX_QUEUE_SIZE` | `int` | `100` | asyncio.Queue maxsize — 503 only when this is full |
+| `JOB_TTL_SECONDS` | `int` | `300` | Eviction age for DONE/FAILED jobs |
+| `SPEAKERS_DIR` | `str` | `"./speakers"` | Root for speaker subdirectories |
+| `OUTPUTS_DIR` | `str` | `"./outputs"` | Where finished audio files are written |
+| `MAX_TEXT_LENGTH` | `int` | `5000` | Hard cap on input text length |
+| `SAMPLE_RATE` | `int` | `24000` | XTTS-v2 native sample rate — do not change |
+| `LOG_LEVEL` | `str` | `"INFO"` | Passed to logging |
 
-Settings are loaded via `load_settings()` in `main.py` lifespan. It logs all values and validates `MODEL_PATH` before proceeding.
+Required model files in `MODEL_PATH`: `config.json`, `model.pth`, `vocab.json`.
+
+Supported languages (17): `en es fr de it pt pl tr ru nl cs ar zh-cn ja hu ko hi`
 
 ---
 
@@ -178,14 +265,14 @@ Settings are loaded via `load_settings()` in `main.py` lifespan. It logs all val
 
 **Startup** (in `main.py` lifespan, order is load-bearing):
 1. `load_settings()` — validates config and model files
-2. `Dispatcher.start()` — spawns worker processes synchronously (before event loop enters async code — `multiprocessing.Process.start()` is not async-safe)
+2. `Dispatcher.start()` — starts Manager process, then spawns worker processes synchronously (before the event loop enters async code — `multiprocessing.Process.start()` is not async-safe)
 3. `JobStore`, `SpeakerStore`, `QueueManager` — plain construction
 4. `job_store.start()`, `queue_manager.start()`, `dispatcher.start_background_tasks()` — start async background tasks
 5. `speaker_store.preload_all()` — warm the RAM cache
 
 **Shutdown** (reverse dependency order):
 1. `queue_manager.shutdown()` — stop accepting new work
-2. `dispatcher.shutdown()` — send `None` sentinels to workers, join processes
+2. `dispatcher.shutdown()` — send `None` sentinels to workers, join processes, shut down Manager
 3. `job_store.shutdown()` — cancel TTL cleanup task
 
 ---
@@ -227,20 +314,21 @@ Ignored: `E501` (line length, handled by formatter), `B008` (FastAPI Depends pat
 
 `audio.py` supports `wav`, `mp3`, `ogg`, `flac`.
 
-- `wav` / `ogg` / `flac` — via `soundfile` (libsndfile)
-- `mp3` — via `pydub` + `ffmpeg` (ffmpeg must be on PATH)
-- WebSocket streaming always sends raw `float32` PCM at 24 000 Hz mono (no container format)
+- `wav` / `ogg` / `flac` — via `soundfile` (libsndfile), PCM-16/PCM-24 depending on format
+- `mp3` — via `pydub` + `ffmpeg` (ffmpeg must be on PATH; pydub is only imported when MP3 is requested)
+- WebSocket streaming always sends raw `float32` PCM at 24 000 Hz mono (no container)
 
 ---
 
 ## Known Limitations / Future Work
 
-- **Authentication:** no API key or auth middleware yet. Add it as a FastAPI dependency on the router level.
+- **Authentication:** no API key or auth middleware yet. Add as a FastAPI dependency on router level.
 - **Persistence:** job store is in-memory. Server restart loses all pending/running jobs. Add SQLite or Redis for durability.
 - **Speaker update:** no `PUT /v1/speakers/{name}` endpoint. Delete + re-register to update a voice.
 - **Long texts:** XTTS-v2 degrades on very long inputs. Consider splitting at sentence boundaries before `model.inference()` and concatenating audio chunks.
 - **CPU fallback:** config supports 0 GPUs (single CPU worker), but latency will be high (~10-30× real time). Only suitable for dev/testing.
-- **Dockerfile requirements.in path:** the Dockerfile still copies `xtts_server/requirements.in`. Now that `requirements.in` and `requirements.txt` live at the project root, update the `COPY` instruction when rebuilding the image.
+- **Dockerfile requirements path:** the Dockerfile copies `xtts_server/requirements.in` — now that deps live at project root, update the `COPY` instruction when rebuilding.
+- **`WorkerHandle.total_requests` not incremented:** `worker_stats()` always shows `total_requests=0` and `avg_synthesis_ms=0.0`. The worker process tracks its own `total_requests` locally (logged at shutdown) but never reports back to the dispatcher. Fix: increment `w.total_requests` in `dispatcher.release()`.
 
 ---
 
