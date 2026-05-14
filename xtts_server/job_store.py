@@ -197,6 +197,13 @@ class JobStore:
             job.error = error
         logger.error("Job failed | job_id=%s | error=%s", job_id, error[:200])
 
+    async def clear_audio_path(self, job_id: str) -> None:
+        """Clear audio_path after the file has been served and deleted from disk."""
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.audio_path = None
+
     # ------------------------------------------------------------------
     # Read path
     # ------------------------------------------------------------------

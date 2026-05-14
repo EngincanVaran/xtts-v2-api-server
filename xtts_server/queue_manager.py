@@ -225,7 +225,9 @@ class QueueManager:
             result = SynthesisResult(job_id=request.job_id, audio=None, error=str(exc))
 
         # Release the worker slot so the drain loop can dispatch the next request.
-        await self._dispatcher.release(worker.worker_id, elapsed_ms=elapsed_ms)
+        await self._dispatcher.release(
+            worker.worker_id, elapsed_ms=elapsed_ms, job_id=request.job_id
+        )
 
         # Notify the job store (or whatever the caller registered).
         await on_complete(worker, result)

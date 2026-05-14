@@ -50,7 +50,9 @@ class JobResponse(BaseModel):
 
 
 def _job_to_response(job: Job) -> JobResponse:
-    audio_url = f"/v1/tts/{job.job_id}/audio" if job.status == JobStatus.DONE else None
+    audio_url = (
+        f"/v1/tts/{job.job_id}/audio" if job.status == JobStatus.DONE and job.audio_path else None
+    )
     return JobResponse(
         job_id=job.job_id,
         status=job.status.value,

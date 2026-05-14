@@ -187,7 +187,7 @@ async def stream_tts(websocket: WebSocket) -> None:
         finally:
             # Always release the worker slot — covers normal completion,
             # client disconnect (WebSocketDisconnect), and unexpected errors.
-            await state.dispatcher.release(worker.worker_id, elapsed_ms=0.0)
+            await state.dispatcher.release(worker.worker_id, elapsed_ms=0.0, job_id=job_id)
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected by client | job_id=%s", job_id)

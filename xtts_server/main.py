@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI):
     # 4. Start async background tasks.
     await job_store.start()
     await queue_manager.start()
-    await dispatcher.start_background_tasks()
+    await dispatcher.start_background_tasks(queue_depth_fn=queue_manager.depth)
 
     # 5. Warm the speaker cache from disk.
     loaded = speaker_store.preload_all()

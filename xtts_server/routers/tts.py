@@ -35,6 +35,7 @@ Language handling
 """
 
 import asyncio
+import contextlib
 import multiprocessing
 import os
 import uuid
@@ -43,6 +44,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 import numpy as np
 from pydantic import BaseModel, Field, field_validator
+from starlette.background import BackgroundTask
 
 from audio import (
     SUPPORTED_FORMATS,
@@ -366,7 +368,13 @@ async def get_audio(job_id: str, request: Request):
             detail=f"Job '{job_id}' is not done yet (status: {job.status.value}).",
         )
 
-    if not job.audio_path or not os.path.isfile(job.audio_path):
+    if not job.audio_path:
+        raise HTTPException(
+            status_code=410,
+            detail=f"Audio for job '{job_id}' has already been downloaded and deleted.",
+        )
+
+    if not os.path.isfile(job.audio_path):
         logger.error("Audio file missing on disk for job %s: %s", job_id, job.audio_path)
         raise HTTPException(status_code=500, detail="Audio file not found on disk.")
 
@@ -374,11 +382,21 @@ async def get_audio(job_id: str, request: Request):
     ext = os.path.splitext(job.audio_path)[1].lstrip(".")
     media_type = mime_type(ext) if ext in SUPPORTED_FORMATS else "application/octet-stream"
 
-    logger.info("Serving audio | job_id=%s | path=%s", job_id, job.audio_path)
+    audio_path = job.audio_path
+    state = request.app.state
+
+    async def _delete_after_send() -> None:
+        with contextlib.suppress(OSError):
+            os.remove(audio_path)
+        await state.job_store.clear_audio_path(job_id)
+        logger.info("Audio deleted after download | job_id=%s", job_id)
+
+    logger.info("Serving audio | job_id=%s | path=%s", job_id, audio_path)
     return FileResponse(
-        path=job.audio_path,
+        path=audio_path,
         media_type=media_type,
-        filename=os.path.basename(job.audio_path),
+        filename=os.path.basename(audio_path),
+        background=BackgroundTask(_delete_after_send),
     )
 
 

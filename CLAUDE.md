@@ -155,6 +155,14 @@ This guarantees the slot is freed even if the client disconnects mid-stream or a
 ### 10. Least-loaded dispatch
 `dispatcher._pick_worker()` returns `min(workers, key=lambda w: w.active_requests)`. The `active_requests` counter is incremented in `dispatch()` and decremented in `release()`, both under the `asyncio.Condition` lock.
 
+### 11. Per-worker active job tracking
+`WorkerHandle.active_jobs: dict[str, float]` maps job_id → monotonic start time. Populated in `dispatch()`, evicted in `release(job_id=...)`. All three `release()` callers (queue_manager, ws/stream, compute_latents) pass `job_id`. This drives the periodic status log (shows each job and its elapsed time per worker) and the `/v1/system/info` response (`worker_stats()` includes `active_jobs`).
+
+`release()` also increments `WorkerHandle.total_requests` (fixing the long-standing bug where it always showed 0).
+
+### 12. Audio file deleted after first download
+`GET /v1/tts/{job_id}/audio` uses a `starlette.background.BackgroundTask` to delete the audio file from disk and clear `job.audio_path` immediately after the response is sent. Subsequent downloads return `410 Gone`. The polling response (`GET /v1/jobs/{id}`) hides `audio_url` once `audio_path` is cleared. The TTL cleanup loop is unaffected (it skips files that are already gone).
+
 ---
 
 ## WebSocket Protocol (`/v1/stream`)
@@ -330,7 +338,6 @@ Ignored: `E501` (line length, handled by formatter), `B008` (FastAPI Depends pat
 - **Long texts:** XTTS-v2 degrades on very long inputs. Consider splitting at sentence boundaries before `model.inference()` and concatenating audio chunks.
 - **CPU fallback:** config supports 0 GPUs (single CPU worker), but latency will be high (~10-30× real time). Only suitable for dev/testing.
 - **Dockerfile requirements path:** the Dockerfile copies `xtts_server/requirements.in` — now that deps live at project root, update the `COPY` instruction when rebuilding.
-- **`WorkerHandle.total_requests` not incremented:** `worker_stats()` always shows `total_requests=0` and `avg_synthesis_ms=0.0`. The worker process tracks its own `total_requests` locally (logged at shutdown) but never reports back to the dispatcher. Fix: increment `w.total_requests` in `dispatcher.release()`.
 
 ---
 

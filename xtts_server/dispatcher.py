@@ -22,10 +22,12 @@ Dispatcher.make_queue() everywhere a result queue is needed.
 """
 
 import asyncio
+from collections.abc import Callable
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import multiprocessing
 import multiprocessing.managers
+import time
 
 from logging_config import get_logger
 from worker import (
@@ -57,6 +59,8 @@ class WorkerHandle:
     active_requests: int = 0
     total_requests: int = 0
     total_synthesis_ms: float = 0.0
+    # job_id → monotonic start time; populated by dispatch(), evicted by release()
+    active_jobs: dict[str, float] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +78,9 @@ class Dispatcher:
         # Initialized lazily on first use so it binds to the running event loop.
         self._cond: asyncio.Condition | None = None
         self._status_task: asyncio.Task | None = None
+        # Optional callable that returns the current queue depth — injected at
+        # start_background_tasks() time to avoid a circular import with QueueManager.
+        self._queue_depth_fn: Callable[[], int] | None = None
         # Manager is used to create result queues that can be passed to worker
         # processes at runtime via the request queue.  Spawn-context Queues
         # cannot be pickled after process creation (Python 3.11 strictly enforces
@@ -144,8 +151,9 @@ class Dispatcher:
 
         logger.info("Dispatcher — all workers spawned")
 
-    async def start_background_tasks(self) -> None:
+    async def start_background_tasks(self, queue_depth_fn: Callable[[], int] | None = None) -> None:
         """Start periodic status logging. Call after the event loop is running."""
+        self._queue_depth_fn = queue_depth_fn
         self._status_task = asyncio.create_task(self._periodic_status())
 
     async def shutdown(self) -> None:
@@ -210,6 +218,7 @@ class Dispatcher:
         async with cond:
             worker = self._pick_worker()
             worker.active_requests += 1
+            worker.active_jobs[request.job_id] = time.monotonic()
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, worker.request_queue.put, request)
@@ -223,13 +232,12 @@ class Dispatcher:
         )
         return worker
 
-    async def release(self, worker_id: str, elapsed_ms: float = 0.0) -> None:
+    async def release(self, worker_id: str, elapsed_ms: float = 0.0, job_id: str = "") -> None:
         """
         Decrement active_requests for the given worker and notify all waiters.
         Must be called every time a dispatched request completes (or errors).
         """
         if not worker_id:
-            # Empty worker_id is a no-op (defensive guard for edge cases).
             return
 
         cond = self._get_cond()
@@ -238,6 +246,9 @@ class Dispatcher:
                 if w.worker_id == worker_id:
                     w.active_requests = max(0, w.active_requests - 1)
                     w.total_synthesis_ms += elapsed_ms
+                    w.total_requests += 1
+                    if job_id:
+                        w.active_jobs.pop(job_id, None)
                     break
             cond.notify_all()
 
@@ -264,8 +275,7 @@ class Dispatcher:
         try:
             result: LatentsResult = await loop.run_in_executor(None, result_queue.get)
         finally:
-            # Always release, even if result_queue.get() raises.
-            await self.release(worker.worker_id, elapsed_ms=0.0)
+            await self.release(worker.worker_id, elapsed_ms=0.0, job_id=job_id)
 
         return result
 
@@ -295,6 +305,7 @@ class Dispatcher:
 
     def worker_stats(self) -> list[dict]:
         """Snapshot of per-worker stats. Used for /v1/system/info and logging."""
+        now = time.monotonic()
         return [
             {
                 "worker_id": w.worker_id,
@@ -305,6 +316,10 @@ class Dispatcher:
                     w.total_synthesis_ms / w.total_requests if w.total_requests else 0.0
                 ),
                 "alive": w.process.is_alive(),
+                "active_jobs": [
+                    {"job_id": jid, "elapsed_s": round(now - started_at, 2)}
+                    for jid, started_at in w.active_jobs.items()
+                ],
             }
             for w in self._workers
         ]
@@ -320,23 +335,32 @@ class Dispatcher:
     async def _periodic_status(self) -> None:
         while True:
             await asyncio.sleep(60)
-            self._log_status()
+            depth = self._queue_depth_fn() if self._queue_depth_fn else None
+            self._log_status(queue_depth=depth)
 
-    def _log_status(self) -> None:
-        logger.info("--- Periodic worker status ---")
+    def _log_status(self, queue_depth: int | None = None) -> None:
+        now = time.monotonic()
+        queue_info = f" | queue={queue_depth} waiting" if queue_depth is not None else ""
+        logger.info("--- Worker status%s ---", queue_info)
+
         for w in self._workers:
             avg_ms = w.total_synthesis_ms / w.total_requests if w.total_requests else 0.0
             logger.info(
-                "  worker=%s gpu=%d active=%d total=%d avg_ms=%.1f alive=%s",
+                "  worker=%s  gpu=%d  alive=%s  active=%d  total=%d  avg_ms=%.1f",
                 w.worker_id,
                 w.gpu_index,
+                w.process.is_alive(),
                 w.active_requests,
                 w.total_requests,
                 avg_ms,
-                w.process.is_alive(),
             )
+            if w.active_jobs:
+                for job_id, started_at in w.active_jobs.items():
+                    elapsed = now - started_at
+                    logger.info("    job=%s  elapsed=%.1fs", job_id, elapsed)
+            else:
+                logger.info("    (idle)")
 
-        # Lazy torch import — avoid pulling CUDA into the main process at module load.
         try:
             import torch
 
@@ -354,4 +378,4 @@ class Dispatcher:
         except ImportError:
             pass
 
-        logger.info("--- End status ---")
+        logger.info("--- End worker status ---")
