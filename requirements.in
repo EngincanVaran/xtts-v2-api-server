@@ -22,12 +22,15 @@ fastapi
 uvicorn[standard]
 python-multipart
 
-# TTS model
-coqui-tts
+# TTS model — original Coqui TTS package; 0.22.0 is the last release before
+# the project forked to coqui-tts and adopted transformers 5.x (requires torch>=2.4)
+TTS==0.22.0
 
-# Deep learning
-torch
-torchaudio
+# Deep learning — torch 2.4+ dropped Intel Mac (osx-64) support; 2.2.2 is the max
+torch==2.2.2
+torchaudio==2.2.2
+# transformers 4.45+ requires torch>=2.4; cap to stay on torch 2.2.2
+transformers>=4.37,<4.45
 
 # Audio I/O and conversion
 soundfile
