@@ -176,14 +176,16 @@ Close code `1013` (Try Again Later) is used when the queue is full.
 
 On-disk layout for each speaker (`SPEAKERS_DIR/{name}/`):
 ```
-ref.wav        # copy of the original reference audio
-latents.npz    # gpt_cond_latent (shape 1×T×1024) + speaker_embedding (shape 1×512)
-meta.json      # {"name": "...", "created_at": "ISO-8601"}
+ref.wav        # copy of the original reference audio (absent for studio speakers)
+latents.npz    # gpt_cond_latent (shape 1×T×1024) + speaker_embedding (shape 1×512×1)
+meta.json      # {"name": "...", "created_at": "ISO-8601", ["source": "studio", "original_name": "..."]}
 ```
 
 `SpeakerStore` keeps a `dict[str, SpeakerRecord]` RAM cache. `preload_all()` is called at startup. `get()` falls back to disk on cache miss. `delete()` evicts cache **before** `shutil.rmtree` (under `threading.Lock`) — this order is important; reversing it creates a window where the cache holds a record pointing to deleted files.
 
 Worker processes receive latents as **CPU numpy arrays** (picklable). Each worker converts them to device tensors inside `_handle_synthesis()`. Never pass GPU tensors across process boundaries.
+
+`speaker_embedding` shape is `(1, 512, 1)` — this matches the model's conv1d layer `(N, C_in=512, L=1)`. Storing it as `(1, 512)` causes a channel-mismatch error at inference. The seed script enforces this with `arr.reshape(-1)[None, :, None]`.
 
 **Clone limits:**
 - Max upload size: 10 MB (`_MAX_AUDIO_BYTES` in `clone.py`)

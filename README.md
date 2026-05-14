@@ -6,7 +6,9 @@ A production-grade, multi-GPU text-to-speech API server built on [Coqui XTTS-v2]
 
 - **Multi-GPU worker pool** — spawn multiple XTTS-v2 processes across any number of GPUs, each configured independently
 - **Async fire-and-poll jobs** — `POST /v1/tts` returns a `job_id` instantly; clients poll until done
+- **Synchronous endpoint** — `POST /v1/tts/sync` blocks and returns the audio file directly in the response
 - **WebSocket streaming** — receive raw PCM chunks as they are generated (~200–400 ms to first audio)
+- **58 built-in studio speakers** — seed from the model's `speakers_xtts.pth` in seconds, no audio upload needed
 - **Voice cloning** — upload a reference audio clip, register a speaker name, reuse it forever
 - **Batch synthesis** — submit up to 50 TTS items in a single request
 - **Request queue** — clients wait instead of receiving 503 (only returned when the queue itself is full)
@@ -20,6 +22,7 @@ A production-grade, multi-GPU text-to-speech API server built on [Coqui XTTS-v2]
 Client
   │
   ├── POST /v1/tts          ──►  QueueManager (asyncio.Queue)
+  ├── POST /v1/tts/sync     ──►        │  (blocks, returns audio directly)
   ├── POST /v1/batch        ──►        │
   ├── WS   /v1/stream       ──►        ▼
   │                              Dispatcher
@@ -82,7 +85,41 @@ To regenerate the lockfile after editing `requirements.in`:
 pip-compile requirements.in -o requirements.txt
 ```
 
-### 3. Run the server
+### 3. Seed the studio speakers (optional but recommended)
+
+XTTS-v2 ships with 58 built-in voices stored in `speakers_xtts.pth`. Register them all in seconds — no audio upload, no model load required:
+
+```bash
+# run from project root
+python seed_studio_speakers.py --model-path ./model --speakers-dir ./xtts_server/speakers
+```
+
+| Flag | Description |
+|---|---|
+| `--model-path` | Directory containing `speakers_xtts.pth` (default: `$MODEL_PATH` or `./model`) |
+| `--speakers-dir` | SpeakerStore root (default: `$SPEAKERS_DIR` or `./xtts_server/speakers`) |
+| `--force` | Overwrite already-registered speakers |
+| `--dry-run` | Preview what would be written without touching disk |
+
+Speaker names are derived from the display names by replacing spaces with underscores and stripping accented characters (e.g. `"Alma María"` → `"Alma_Maria"`). The original name is preserved in `meta.json` as `"original_name"`.
+
+After seeding, use any studio speaker directly:
+
+```bash
+curl -X POST http://localhost:8000/v1/tts/sync \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello!", "speaker_name": "Craig_Gutsy", "language": "en"}' \
+  -o output.wav
+```
+
+<details>
+<summary>All 58 studio speaker slugs</summary>
+
+`Aaron_Dreschner` `Abrahan_Mack` `Adde_Michal` `Alexandra_Hisakawa` `Alison_Dietlinde` `Alma_Maria` `Ana_Florence` `Andrew_Chipper` `Annmarie_Nele` `Asya_Anara` `Badr_Odhiambo` `Baldur_Sanjin` `Barbora_MacLean` `Brenda_Stern` `Camilla_Holmstrom` `Chandra_MacFarland` `Claribel_Dervla` `Craig_Gutsy` `Daisy_Studious` `Damien_Black` `Damjan_Chapman` `Dionisio_Schuyler` `Eugenio_Matarac` `Ferran_Simen` `Filip_Traverse` `Gilberto_Mathias` `Gitta_Nikolina` `Gracie_Wise` `Henriette_Usha` `Ige_Behringer` `Ilkin_Urbano` `Kazuhiko_Atallah` `Kumar_Dahl` `Lidiya_Szekeres` `Lilya_Stainthorpe` `Ludvig_Milivoj` `Luis_Moray` `Maja_Ruoho` `Marcos_Rudaski` `Narelle_Moon` `Nova_Hogarth` `Rosemary_Okafor` `Royston_Min` `Sofia_Hellen` `Suad_Qasim` `Szofi_Granger` `Tammie_Ema` `Tammy_Grit` `Tanja_Adelina` `Torcull_Diarmuid` `Uta_Obando` `Viktor_Eka` `Viktor_Menelaos` `Vjollca_Johnnie` `Wulf_Carlevaro` `Xavier_Hayasaka` `Zacharie_Aimilios` `Zofija_Kendrick`
+
+</details>
+
+### 4. Run the server
 
 ```bash
 export MODEL_PATH=/path/to/your/xtts-v2
@@ -143,6 +180,17 @@ Response:
   "message": "Speaker 'alice' registered. Use it with POST /v1/tts."
 }
 ```
+
+### Synthesise speech (sync — waits and returns audio directly)
+
+```bash
+curl -X POST http://localhost:8000/v1/tts/sync \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello, world!", "speaker_name": "Claribel_Dervla", "language": "en"}' \
+  -o speech.wav
+```
+
+The response body **is** the audio file. An `X-Job-Id` header is included for log correlation.
 
 ### Synthesise speech (async job)
 
@@ -256,11 +304,12 @@ docker run --gpus all \
 
 ```
 xtts-v2-api-server/
-├── requirements.in     # Direct dependencies (pip-tools source)
-├── requirements.txt    # Pinned lockfile (generated — do not edit by hand)
-├── pyproject.toml      # ruff config
+├── requirements.in          # Direct dependencies (pip-tools source)
+├── requirements.txt         # Pinned lockfile (generated — do not edit by hand)
+├── pyproject.toml           # ruff config
 ├── Dockerfile
 ├── .env.example
+├── seed_studio_speakers.py  # One-time script: register all 58 studio voices
 └── xtts_server/
     ├── main.py             # FastAPI app factory, startup/shutdown lifecycle
     ├── config.py           # Pydantic settings, MODEL_PATH validation
@@ -273,7 +322,7 @@ xtts-v2-api-server/
     ├── logging_config.py   # Structured logging, rotating file handler
     ├── routers/
     │   ├── system.py       # GET /health, GET /v1/system/info
-    │   ├── tts.py          # POST /v1/tts, GET /v1/tts/{id}/audio
+    │   ├── tts.py          # POST /v1/tts, POST /v1/tts/sync, GET /v1/tts/{id}/audio
     │   ├── clone.py        # POST /v1/clone
     │   ├── batch.py        # POST /v1/batch
     │   ├── jobs.py         # GET /v1/jobs/{id}, GET /v1/jobs
